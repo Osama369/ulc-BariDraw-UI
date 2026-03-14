@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+/* Prevent page-level scroll; all scrolling must happen inside panels. */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: #111827; /* Tailwind gray-900 */
+}
+
+/* App scrollbar styling (matches dark UI, avoids white track on Windows). */
+.sidebar-scroll,
+.app-scroll {
+  scrollbar-gutter: stable;
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: rgba(148, 163, 184, 0.55) transparent; /* thumb track */
+}
+
+.sidebar-scroll::-webkit-scrollbar,
+.app-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.sidebar-scroll::-webkit-scrollbar-track,
+.app-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar-scroll::-webkit-scrollbar-thumb,
+.app-scroll::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 9999px;
+  border: 3px solid rgba(31, 41, 55, 0.9); /* makes thumb look thinner */
+}
+
+.sidebar-scroll::-webkit-scrollbar-thumb:hover,
+.app-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.55);
+}
+
