@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, useDeferredValue } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useDeferredValue, useCallback } from 'react';
 import { data, useNavigate } from 'react-router-dom';
 import axios from "axios";
 import jsPDF from "jspdf";
@@ -116,6 +116,12 @@ const EntriesTable = React.memo(
     onDeleteRecord,
     onDeleteEntry,
   }) {
+    const ROW_HEIGHT = 46;
+    const OVERSCAN = 10;
+    const scrollRef = useRef(null);
+    const [scrollTop, setScrollTop] = useState(0);
+    const [viewportHeight, setViewportHeight] = useState(0);
+
     const selectedSet = useMemo(() => new Set(selectedEntries), [selectedEntries]);
 
     const groups = useMemo(() => {
@@ -138,6 +144,53 @@ const EntriesTable = React.memo(
     const allSelected =
       groups.length > 0 &&
       groups.every((g) => g.rows.every((entry) => selectedSet.has(getEntryKey(entry))));
+
+    const flatRows = useMemo(() => {
+      const rows = [];
+      for (const g of groups) {
+        for (let ri = 0; ri < g.rows.length; ri += 1) {
+          const entry = g.rows[ri];
+          rows.push({
+            group: g,
+            entry,
+            isFirstRow: ri === 0,
+            key: getEntryKey(entry),
+          });
+        }
+      }
+      return rows;
+    }, [groups]);
+
+    useEffect(() => {
+      const el = scrollRef.current;
+      if (!el) return;
+
+      const updateSize = () => setViewportHeight(el.clientHeight || 0);
+      updateSize();
+
+      let ro;
+      if (typeof ResizeObserver !== 'undefined') {
+        ro = new ResizeObserver(updateSize);
+        ro.observe(el);
+      } else {
+        window.addEventListener('resize', updateSize);
+      }
+
+      return () => {
+        if (ro) ro.disconnect();
+        else window.removeEventListener('resize', updateSize);
+      };
+    }, []);
+
+    const totalRows = flatRows.length;
+    const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+    const endIndex = Math.min(
+      totalRows,
+      Math.ceil((scrollTop + Math.max(viewportHeight, ROW_HEIGHT)) / ROW_HEIGHT) + OVERSCAN
+    );
+    const visibleRows = flatRows.slice(startIndex, endIndex);
+    const topPadding = startIndex * ROW_HEIGHT;
+    const bottomPadding = (totalRows - endIndex) * ROW_HEIGHT;
 
     return (
       <div className="flex-1 min-h-0 flex flex-col overflow-x-auto">
@@ -177,7 +230,11 @@ const EntriesTable = React.memo(
         </table>
 
         {/* Scroll only the rows */}
-        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain app-scroll">
+        <div
+          ref={scrollRef}
+          className="flex-1 min-h-0 overflow-y-auto overscroll-contain app-scroll"
+          onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+        >
           {groups.length === 0 ? (
             <div className="h-full min-h-[160px] flex items-center justify-center text-sm text-gray-300">
               No entries yet.
@@ -192,57 +249,67 @@ const EntriesTable = React.memo(
                 <col className="w-[86px]" />
               </colgroup>
               <tbody>
-                {groups.map((g, gi) =>
-                  g.rows.map((entry, ri) => {
-                    const key = getEntryKey(entry);
-                    const canDeleteRecord = !!g.parentId;
-                    const canDeleteEntry = !!entry?.objectId;
-                    const onDelete = () => {
-                      if (canDeleteRecord) return onDeleteRecord(g.parentId);
-                      if (canDeleteEntry) return onDeleteEntry(entry);
-                    };
+                {topPadding > 0 && (
+                  <tr>
+                    <td colSpan={5} style={{ height: `${topPadding}px`, padding: 0, border: 'none' }} />
+                  </tr>
+                )}
 
-                    return (
-                      <tr
-                        key={key || `${g.groupKey}_${gi}_${ri}`}
-                        className="border-b border-gray-700 hover:bg-gray-700/30"
-                      >
-                        <td className="px-3 py-2.5 align-middle">
-                          <input
-                            type="checkbox"
-                            checked={selectedSet.has(key)}
-                            onChange={() => onToggleSelectEntry(key)}
-                            className="w-4 h-4"
-                            disabled={!key}
-                          />
-                        </td>
-                        <td className="px-3 py-2.5 font-semibold tabular-nums align-middle">
-                          {entry.no}
-                        </td>
-                        <td className="px-3 py-2.5 tabular-nums align-middle">{entry.f}</td>
-                        <td className="px-3 py-2.5 tabular-nums align-middle">{entry.s}</td>
+                {visibleRows.map((item, idx) => {
+                  const { group: g, entry, isFirstRow, key } = item;
+                  const prevVisible = idx > 0 ? visibleRows[idx - 1] : null;
+                  const showActionInViewport = isFirstRow || !prevVisible || prevVisible.group.groupKey !== g.groupKey;
+                  const canDeleteRecord = !!g.parentId;
+                  const canDeleteEntry = !!entry?.objectId;
+                  const onDelete = () => {
+                    if (canDeleteRecord) return onDeleteRecord(g.parentId);
+                    if (canDeleteEntry) return onDeleteEntry(entry);
+                  };
 
-                        {ri === 0 ? (
-                          <td className="px-3 py-2.5 align-middle" rowSpan={g.rows.length}>
-                            <button
-                              onClick={onDelete}
-                              className="inline-flex items-center justify-center w-9 h-9 rounded-full bg-rose-200/90 text-rose-700 hover:bg-rose-200 disabled:opacity-60"
-                              disabled={!canDeleteRecord && !canDeleteEntry}
-                              title={
-                                canDeleteRecord
-                                  ? "Delete record"
-                                  : canDeleteEntry
-                                    ? "Delete entry"
-                                    : "Not saved yet"
-                              }
-                            >
-                              <FaTrash />
-                            </button>
-                          </td>
+                  return (
+                    <tr
+                      key={key || `${g.groupKey}_${startIndex + idx}`}
+                      className="border-b border-gray-700 hover:bg-gray-700/30"
+                      style={{ height: `${ROW_HEIGHT}px` }}
+                    >
+                      <td className="px-3 py-2.5 align-middle">
+                        <input
+                          type="checkbox"
+                          checked={selectedSet.has(key)}
+                          onChange={() => onToggleSelectEntry(key)}
+                          className="w-4 h-4"
+                          disabled={!key}
+                        />
+                      </td>
+                      <td className="px-3 py-2.5 font-semibold tabular-nums align-middle">{entry.no}</td>
+                      <td className="px-3 py-2.5 tabular-nums align-middle">{entry.f}</td>
+                      <td className="px-3 py-2.5 tabular-nums align-middle">{entry.s}</td>
+                      <td className="px-3 py-2.5 align-middle">
+                        {showActionInViewport ? (
+                          <button
+                            onClick={onDelete}
+                            className="inline-flex items-center justify-center w-9 h-9 rounded-full bg-rose-200/90 text-rose-700 hover:bg-rose-200 disabled:opacity-60"
+                            disabled={!canDeleteRecord && !canDeleteEntry}
+                            title={
+                              canDeleteRecord
+                                ? 'Delete record'
+                                : canDeleteEntry
+                                  ? 'Delete entry'
+                                  : 'Not saved yet'
+                            }
+                          >
+                            <FaTrash />
+                          </button>
                         ) : null}
-                      </tr>
-                    );
-                  })
+                      </td>
+                    </tr>
+                  );
+                })}
+
+                {bottomPadding > 0 && (
+                  <tr>
+                    <td colSpan={5} style={{ height: `${bottomPadding}px`, padding: 0, border: 'none' }} />
+                  </tr>
                 )}
               </tbody>
             </table>
@@ -375,6 +442,7 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
   const [importClientId, setImportClientId] = useState("");
   const [importFile, setImportFile] = useState(null);
   const [importParsedRows, setImportParsedRows] = useState([]);
+  const [importDetectedMode, setImportDetectedMode] = useState("");
   const [importing, setImporting] = useState(false);
   const [parties, setParties] = useState([]);
   const [clients, setClients] = useState([]);
@@ -566,14 +634,14 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
 
 
   // Toggle single row
-  const toggleSelectEntry = (entryId) => {
+  const toggleSelectEntry = useCallback((entryId) => {
     if (!entryId) return;
     setSelectedEntries((prev) =>
       prev.includes(entryId)
         ? prev.filter((id) => id !== entryId)
         : [...prev, entryId]
     );
-  };
+  }, []);
 
   // Toggle Select All
   const toggleSelectAll = () => {
@@ -1009,6 +1077,9 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
     };
   }, [entries]);
 
+  // Keep typing interactions responsive while very large tables update in background.
+  const deferredEntries = useDeferredValue(entries);
+
   if (loading) {  // this is loading that is running in seprately 
     return <p className="text-center text-lg"><Spinner /></p>;
   }
@@ -1017,7 +1088,7 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
     return <p className="text-center text-red-600">{error}</p>;
   }
 
-  const parseRlcDbf = async (file) => {
+  const parseDbfFile = async (file) => {
     const buf = await file.arrayBuffer();
     const bytes = new Uint8Array(buf);
     const view = new DataView(buf);
@@ -1026,42 +1097,110 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
     const headerLength = view.getUint16(8, true);
     const recordLength = view.getUint16(10, true);
 
-    const rows = [];
+    if (!recordCount || !headerLength || !recordLength) {
+      throw new Error('Invalid DBF header');
+    }
+
     const decoder = new TextDecoder('ascii');
+    const fields = [];
+    let cursor = 32;
+    while (cursor + 32 <= bytes.length && bytes[cursor] !== 0x0d) {
+      const fieldBytes = bytes.slice(cursor, cursor + 32);
+      const rawName = decoder.decode(fieldBytes.slice(0, 11));
+      const name = rawName.replace(/\u0000/g, '').trim();
+      const type = String.fromCharCode(fieldBytes[11] || 67);
+      const length = fieldBytes[16] || 0;
+      if (name && length > 0) {
+        fields.push({ name, type, length });
+      }
+      cursor += 32;
+    }
+
+    if (!fields.length) {
+      throw new Error('No field descriptors found in DBF');
+    }
+
+    let fieldOffset = 1; // first byte in record is delete flag
+    const fieldsWithOffset = fields.map((fdesc) => {
+      const out = { ...fdesc, offset: fieldOffset };
+      fieldOffset += fdesc.length;
+      return out;
+    });
+
+    const fieldMap = new Map();
+    fieldsWithOffset.forEach((fdesc) => {
+      fieldMap.set(String(fdesc.name).toUpperCase(), fdesc);
+    });
+
+    const hasRlc = fieldMap.has('ANO') && fieldMap.has('SUM_A1') && fieldMap.has('SUM_A2');
+    const hasMohsin = fieldMap.has('PKT') && fieldMap.has('P_PRIZE1') && fieldMap.has('P_PRIZE2');
+
+    let detectedMode = '';
+    if (hasRlc) detectedMode = 'RLC';
+    else if (hasMohsin) detectedMode = 'Mohsin';
+    else {
+      throw new Error('Unsupported DBF schema. Required fields not found.');
+    }
+
+    const readFieldRaw = (recordOffset, fieldName) => {
+      const fdesc = fieldMap.get(String(fieldName).toUpperCase());
+      if (!fdesc) return '';
+      const start = recordOffset + fdesc.offset;
+      const end = start + fdesc.length;
+      if (end > bytes.length) return '';
+      return decoder.decode(bytes.slice(start, end)).trim();
+    };
+
+    const parseNumeric = (raw) => {
+      const normalized = String(raw || '').replace(/,/g, '').trim();
+      if (!normalized) return 0;
+      const num = Number.parseFloat(normalized);
+      return Number.isFinite(num) ? num : 0;
+    };
+
+    const rows = [];
     for (let i = 0; i < recordCount; i += 1) {
       const offset = headerLength + i * recordLength;
       if (offset + recordLength > bytes.length) break;
       const deletedFlag = bytes[offset];
       if (deletedFlag === 0x2A) continue; // skip deleted
 
-      const start = offset + 1; // skip delete flag
-      const ano = decoder.decode(bytes.slice(start, start + 4)).trim();
-      const sumA1Str = decoder.decode(bytes.slice(start + 4, start + 9)).trim();
-      const sumA2Str = decoder.decode(bytes.slice(start + 9, start + 14)).trim();
-
-      if (!ano) continue;
-      const sumA1 = Number.parseInt(sumA1Str || '0', 10) || 0;
-      const sumA2 = Number.parseInt(sumA2Str || '0', 10) || 0;
-      rows.push({ no: ano, f: sumA1, s: sumA2 });
+      if (detectedMode === 'RLC') {
+        const no = readFieldRaw(offset, 'ANO');
+        if (!no) continue;
+        const fVal = parseNumeric(readFieldRaw(offset, 'SUM_A1'));
+        const sVal = parseNumeric(readFieldRaw(offset, 'SUM_A2'));
+        rows.push({ no, f: fVal, s: sVal });
+      } else {
+        const no = readFieldRaw(offset, 'PKT');
+        if (!no) continue;
+        const fVal = parseNumeric(readFieldRaw(offset, 'P_PRIZE1'));
+        const sVal = parseNumeric(readFieldRaw(offset, 'P_PRIZE2'));
+        rows.push({ no, f: fVal, s: sVal });
+      }
     }
-    return rows;
+
+    return { rows, detectedMode };
   };
 
   const handleImportFileChange = async (event) => {
-    const f = event.target.files && event.target.files[0];
-    setImportFile(f || null);
-    if (!f) {
+    const selectedFile = event.target.files && event.target.files[0];
+    setImportFile(selectedFile || null);
+    setImportDetectedMode('');
+    if (!selectedFile) {
       setImportParsedRows([]);
       return;
     }
     try {
-      const rows = await parseRlcDbf(f);
+      const { rows, detectedMode } = await parseDbfFile(selectedFile);
       setImportParsedRows(rows);
-      toast.success(`Parsed ${rows.length} rows from DBF.`);
+      setImportDetectedMode(detectedMode);
+      toast.success(`Detected ${detectedMode} DBF. Parsed ${rows.length} rows.`);
     } catch (err) {
       console.error('Failed to parse DBF', err);
-      toast.error('Failed to parse DBF file');
+      toast.error(err?.message || 'Failed to parse DBF file');
       setImportParsedRows([]);
+      setImportDetectedMode('');
     }
   };
 
@@ -1091,6 +1230,7 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
       partyId: importPartyId,
       userId: importClientId,
       category: 'general',
+      sourceFormat: importDetectedMode,
     };
 
     setImporting(true);
@@ -1103,6 +1243,7 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
       setShowImportDBFModal(false);
       setImportFile(null);
       setImportParsedRows([]);
+      setImportDetectedMode('');
       setImportDrawId('');
       setImportPartyId('');
       setImportClientId('');
@@ -1332,14 +1473,16 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
       return; // Already handled
     }
 
-
-    // Auto-detect AKR to Packet pattern
-    if (handleAKRtoPacket()) {
+    // Auto-detect Tandula to Packet pattern
+    // Keep this before AKR->Packet so +NNN / N+NN / NN+N
+    // are handled here without AKR pattern validation noise.
+    if (handleTandulaToPacket()) {
       return; // Already handled
     }
 
-    // Auto delete tandula to packet
-    if (handleTandulaToPacket()) {
+
+    // Auto-detect AKR to Packet pattern
+    if (handleAKRtoPacket()) {
       return; // Already handled
     }
 
@@ -1655,9 +1798,9 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
     const rawNo = String(no || '').replace(/\s+/g, '');
     if (!rawNo) return false;
 
-    // If user typed '++' anywhere, reject immediately
+    // If user typed '++', this pattern belongs to AKR->Packet logic.
+    // Do not raise an error here; let other handlers process it.
     if (/\+\+/.test(rawNo)) {
-      toast.error("Invalid pattern: use a single '+' for AKR to Tandula (e.g. +12, 1+2, 12+), not '++'.");
       return false;
     }
 
@@ -1712,6 +1855,13 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
       if (/^\+\+\d$/.test(no)) {
         return false;
       }
+
+      // Tandula->Packet patterns are handled in handleTandulaToPacket.
+      // Skip AKR validation message for those to avoid false error toasts.
+      if (/^\+\d{3}$/.test(no) || /^\d\+\d{2}$/.test(no) || /^\d{2}\+\d$/.test(no)) {
+        return false;
+      }
+
       const allowed = [/^\+\+\d{2}$/, /^\d\+\+\d$/, /^\+\d{2}\+$/, /^\+\d\+\d$/];
       const ok = allowed.some((re) => re.test(no));
       if (!ok) {
@@ -4246,7 +4396,7 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
             <div className="flex flex-col min-h-0">
               <div className="flex-1 min-h-0 bg-gray-800/30 border border-gray-700 rounded-lg overflow-hidden flex flex-col">
                 <EntriesTable
-                  entries={entries}
+                  entries={deferredEntries}
                   selectedEntries={selectedEntries}
                   setSelectedEntries={setSelectedEntries}
                   onToggleSelectEntry={toggleSelectEntry}
@@ -4391,6 +4541,12 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
               <div>
                 <label className="block text-sm font-medium mb-1">Select DBF File</label>
                 <input type="file" accept=".dbf" onChange={handleImportFileChange} className="w-full" />
+                {importFile && (
+                  <p className="text-sm text-gray-700 mt-1">Selected: {importFile.name}</p>
+                )}
+                {importDetectedMode && (
+                  <p className="text-sm text-blue-700 mt-1">Detected format: {importDetectedMode}</p>
+                )}
                 {importParsedRows.length > 0 && (
                   <p className="text-sm text-green-700 mt-1">Parsed {importParsedRows.length} rows</p>
                 )}

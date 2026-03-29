@@ -24,6 +24,7 @@ import {
   FaUsers,
   FaUserPlus,
   FaFileAlt,
+  FaSearch,
   FaUserEdit, // Import icon for editing users
 } from 'react-icons/fa';
 import RoleBasedComponent from './RoleBasedRoute';
@@ -34,6 +35,7 @@ import PartyManager from './PartyManager';
 import CompactHeader from './CompactHeader';
 import TotalSaleReport from './TotalSaleReport';
 import Emails from './Emails';
+import SearchBundle from './SearchBundle';
 const Layout = () => {
   // Hooks to manage states of the variables
   // State for ledger selection, date, and draw time
@@ -178,6 +180,16 @@ const handleLogout = (navigate) => {
             <FaFileAlt className="text-yellow-400" />
             Total Sale Report
           </button>
+
+          <button
+            onClick={() => setActiveTab("search-bundle")}
+            className={`flex items-center px-3 py-2.5 rounded-md gap-2 transition-colors ${
+              activeTab === "search-bundle" ? "bg-gray-700" : "hover:bg-gray-700"
+            }`}
+          >
+            <FaSearch className="text-cyan-400" />
+            Search Bundle
+          </button>
         </RoleBasedComponent>
 
         {/* Emails only for distributors */}
@@ -246,6 +258,7 @@ const handleLogout = (navigate) => {
         {activeTab === "edit-user" && <div className="h-full overflow-y-auto"><DistributorEditUser userId={selectedUserId} theme="dark" /></div>}
         {activeTab === "reports" && <div className="h-full overflow-y-auto"><Reports /></div>}
         {activeTab === "total-sale-report" && <div className="h-full overflow-y-auto"><TotalSaleReport /></div>}
+        {activeTab === "search-bundle" && <div className="h-full overflow-y-auto"><SearchBundle /></div>}
         <RoleBasedComponent requiredRoles={["distributor"]}>
           {activeTab === "emails" && <div className="h-full overflow-y-auto"><Emails /></div>}
         </RoleBasedComponent>
