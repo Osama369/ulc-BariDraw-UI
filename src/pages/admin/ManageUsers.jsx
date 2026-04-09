@@ -4,6 +4,8 @@ import { useDispatch } from "react-redux";
 import { showLoading, hideLoading } from "../../redux/features/alertSlice";
 import toast from 'react-hot-toast';
 import UserTable from "../../components/UserTable";
+import UserForm from "../../components/UserForm";
+import { FaPlus } from 'react-icons/fa';
 
 const ManageUsers = () => {
   const [users, setUsers] = useState([]);
@@ -11,9 +13,10 @@ const ManageUsers = () => {
   const [error, setError] = useState(null);
   const dispatch = useDispatch();
   const [showOnlyDistributors, setShowOnlyDistributors] = useState(true);
+  const [showUserModal, setShowUserModal] = useState(false);
+  const [editingUser, setEditingUser] = useState(null);
 
   const fetchUsers = async () => {
-    dispatch(showLoading());
     setError(null);
     setIsLoading(true);
     const token = localStorage.getItem("adminToken");
@@ -25,11 +28,55 @@ const ManageUsers = () => {
       setUsers(res.data);
     }).catch(err => {
       console.error("Error fetching users:", err);
-      setError(error.response?.data?.message || "Failed to load users");
-      toast.error(error.response?.data?.message || "Failed to load users");
+      setError(err.response?.data?.message || "Failed to load users");
+      toast.error(err.response?.data?.message || "Failed to load users");
       setUsers([]); // Reset to empty array on error
+    }).finally(() => {
+      setIsLoading(false);
     });
   }
+
+  const closeUserModal = () => {
+    setShowUserModal(false);
+    setEditingUser(null);
+  };
+
+  const openCreateModal = () => {
+    setEditingUser(null);
+    setShowUserModal(true);
+  };
+
+  const openEditModal = (user) => {
+    setEditingUser(user || null);
+    setShowUserModal(true);
+  };
+
+  const handleSaveUser = async (userData) => {
+    try {
+      dispatch(showLoading());
+      const token = localStorage.getItem("adminToken");
+
+      if (editingUser && editingUser._id) {
+        await axios.patch(`/api/v1/users/${editingUser._id}`, userData, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        toast.success('Distributor updated successfully');
+      } else {
+        await axios.post('/api/v1/users/create-user', userData, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        toast.success('Distributor created successfully');
+      }
+
+      closeUserModal();
+      fetchUsers();
+    } catch (err) {
+      console.error('Error saving distributor:', err);
+      toast.error(err.response?.data?.error || err.response?.data?.message || 'Failed to save distributor');
+    } finally {
+      dispatch(hideLoading());
+    }
+  };
 
   const toggleStatus = async (id) => {
     try {
@@ -100,10 +147,7 @@ const ManageUsers = () => {
   };
 
   useEffect(() => {
-    console.log("Effect run");
     fetchUsers();
-    setIsLoading(false);
-    dispatch(hideLoading());
   }, []);
   
   return <div>
@@ -123,18 +167,28 @@ const ManageUsers = () => {
             </div>
           ) : (
             <div>
-              <div className="mb-4 flex items-center space-x-2">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center space-x-2 flex-wrap">
+                  <button
+                    onClick={() => setShowOnlyDistributors(true)}
+                    className={`px-3 py-1 rounded ${showOnlyDistributors ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700'}`}
+                  >
+                    Distributors
+                  </button>
+                  <button
+                    onClick={() => setShowOnlyDistributors(false)}
+                    className={`px-3 py-1 rounded ${!showOnlyDistributors ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700'}`}
+                  >
+                    All users
+                  </button>
+                </div>
+
                 <button
-                  onClick={() => setShowOnlyDistributors(true)}
-                  className={`px-3 py-1 rounded ${showOnlyDistributors ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700'}`}
+                  onClick={openCreateModal}
+                  className="inline-flex w-full sm:w-auto justify-center items-center gap-2 px-3 py-2 rounded bg-blue-600 text-white hover:bg-blue-700 shrink-0"
                 >
-                  Distributors
-                </button>
-                <button
-                  onClick={() => setShowOnlyDistributors(false)}
-                  className={`px-3 py-1 rounded ${!showOnlyDistributors ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700'}`}
-                >
-                  All users
+                  <FaPlus size={12} />
+                  Add Distributor
                 </button>
               </div>
               <UserTable 
@@ -142,7 +196,30 @@ const ManageUsers = () => {
                 toggleStatus={toggleStatus}
                 deleteUser={deleteUser}
                 showOnlyDistributors={showOnlyDistributors}
+                onEditUser={openEditModal}
               />
+            </div>
+          )}
+
+          {showUserModal && (
+            <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+              <div className="bg-white rounded-lg w-full max-w-6xl max-h-[95vh] overflow-hidden">
+                <div className="flex items-center justify-between px-6 py-4 border-b">
+                  <h2 className="text-xl font-semibold text-gray-800">
+                    {editingUser ? 'Edit Distributor' : 'Add Distributor'}
+                  </h2>
+                  <button onClick={closeUserModal} className="text-gray-500 hover:text-gray-700">✕</button>
+                </div>
+
+                <div className="p-4">
+                  <UserForm
+                    initialData={editingUser || {}}
+                    isEditing={!!editingUser}
+                    onSubmit={handleSaveUser}
+                    onCancel={closeUserModal}
+                  />
+                </div>
+              </div>
             </div>
           )}
     </div>;

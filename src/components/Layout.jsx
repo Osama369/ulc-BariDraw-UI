@@ -12,8 +12,7 @@ import toast from 'react-hot-toast';
 import Center from './Center';
 
 import DistributerUsers from '../pages/distributor/DistributerUsers';
-import DistributorCreateUser from '../pages/distributor/DistributorCreateUser';
-import DistributorEditUser from '../pages/distributor/DistributorEditUser'; // Import the edit user component
+// create/edit user now handled in modal from Manage Users
 import Spinner from '../components/Spinner'
 import "jspdf-autotable";
 import {
@@ -22,10 +21,8 @@ import {
   FaInbox,
   FaDice,
   FaUsers,
-  FaUserPlus,
   FaFileAlt,
   FaSearch,
-  FaUserEdit, // Import icon for editing users
 } from 'react-icons/fa';
 import RoleBasedComponent from './RoleBasedRoute';
 import { Link } from 'react-router-dom';
@@ -79,7 +76,6 @@ const handleLogout = (navigate) => {
 
  
   const [activeTab, setActiveTab] = useState("Sell Department");
-  const [selectedUserId, setSelectedUserId] = useState(null); // Add state for selected user ID
   const [sidebarVisible, setSidebarVisible] = useState(true);
 
 
@@ -146,16 +142,6 @@ const handleLogout = (navigate) => {
           >
             <FaUsers className="text-blue-400" />
             Party Accounts
-          </button>
-
-          <button
-            onClick={() => setActiveTab("create-user")}
-            className={`flex items-center px-3 py-2.5 rounded-md gap-2 transition-colors ${
-              activeTab === "create-user" ? "bg-gray-700" : "hover:bg-gray-700"
-            }`}
-          >
-            <FaUserPlus className="text-green-400" />
-            Create User
           </button>
 
         </RoleBasedComponent>
@@ -245,17 +231,9 @@ const handleLogout = (navigate) => {
         {activeTab === "hisab" && <div className="h-full overflow-y-auto"><Hisab /></div>}
         {/* {activeTab === "Purchase Department" && <PurchaseDepartment />} */}
         {activeTab === "manage-users" && (
-          <div className="h-full overflow-y-auto">
-            <DistributerUsers onEditUser={(userId) => {
-              console.log("Editing user with ID:", userId);
-              setSelectedUserId(userId);
-              setActiveTab("edit-user");
-            }} />
-          </div>
+          <div className="h-full overflow-y-auto"><DistributerUsers /></div>
         )}
         {activeTab === "manage-parties" && <div className="h-full overflow-y-auto"><PartyManager /></div>}
-        {activeTab === "create-user" && <div className="h-full overflow-y-auto"><DistributorCreateUser theme="dark" /></div>}
-        {activeTab === "edit-user" && <div className="h-full overflow-y-auto"><DistributorEditUser userId={selectedUserId} theme="dark" /></div>}
         {activeTab === "reports" && <div className="h-full overflow-y-auto"><Reports /></div>}
         {activeTab === "total-sale-report" && <div className="h-full overflow-y-auto"><TotalSaleReport /></div>}
         {activeTab === "search-bundle" && <div className="h-full overflow-y-auto"><SearchBundle /></div>}

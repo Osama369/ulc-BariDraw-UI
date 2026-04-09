@@ -11,6 +11,8 @@ import { FaSignOutAlt } from 'react-icons/fa';
 import toast from 'react-hot-toast';
 
 import Spinner from './Spinner'
+import { useDrawsAutoSync } from '../hooks/useDrawsAutoSync';
+import { isDrawVisibleForSell, isDrawVisibleForHistory, formatDrawOptionLabel } from '../utils/drawVisibility';
 import "jspdf-autotable";
 import {
   FaUser,
@@ -52,17 +54,6 @@ const formatRemaining = (ms) => {
 };
 
 const getEntryKey = (entry) => entry?.objectId || entry?._tempId || entry?.id;
-
-const normalizeAuthToken = (raw) => {
-  if (raw == null) return null;
-  const s = String(raw).trim();
-  if (!s || s === "null" || s === "undefined") return null;
-  const token = /^bearer\s+/i.test(s) ? s.replace(/^bearer\s+/i, "").trim() : s;
-  if (!token || token === "null" || token === "undefined") return null;
-  // Backend expects a JWT; avoid sending junk like "Bearer undefined" which triggers 400.
-  if (token.split(".").length !== 3) return null;
-  return token;
-};
 
 const DrawCountdown = React.memo(function DrawCountdown({ selectedDraw }) {
   const [remainingMs, setRemainingMs] = useState(null);
@@ -419,7 +410,10 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
   const [ledger, setLedger] = useState("LEDGER");
   const [drawTime, setDrawTime] = useState("11 AM");  // time slot
   const [drawDate, setDrawDate] = useState(new Date().toISOString().split('T')[0]); // date
-  const [draws, setDraws] = useState([]);
+  const { draws } = useDrawsAutoSync({
+    tokenCandidates: [token, localStorage.getItem('token'), localStorage.getItem('adminToken')],
+    pollMs: 5000,
+  });
   const [selectedDraw, setSelectedDraw] = useState(null);
   const [closingTime, setClosingTime] = useState("");
   const [closingTimeObj, setClosingTimeObj] = useState(null);
@@ -501,32 +495,18 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
     }));
   };
 
-  // Fetch admin-managed draws for draw selection
+  // Keep selected draw object fresh with latest polled draw state.
   useEffect(() => {
-    const fetchDraws = async () => {
-      try {
-        const storedAdminToken = localStorage.getItem('adminToken');
-        const storedUserToken = localStorage.getItem('token');
-        const authToken =
-          normalizeAuthToken(token) ||
-          normalizeAuthToken(storedUserToken) ||
-          normalizeAuthToken(storedAdminToken);
-        if (!authToken) {
-          setDraws([]);
-          return;
-        }
-        const headers = { Authorization: `Bearer ${authToken}` };
-        const res = await axios.get("/api/v1/draws", { headers });
-        // API might return { draws: [...] } or just an array
-        setDraws(res.data.draws || res.data || []);
-      } catch (err) {
-        console.error("Failed to fetch draws", err);
-        // keep draws empty if not authorized
-        setDraws([]);
-      }
-    };
-    fetchDraws();
-  }, [token]);
+    if (!selectedDraw?._id) return;
+    const latest = draws.find((d) => String(d._id) === String(selectedDraw._id));
+    if (!latest) {
+      setSelectedDraw(null);
+      return;
+    }
+    if (latest !== selectedDraw) {
+      setSelectedDraw(latest);
+    }
+  }, [draws, selectedDraw]);
 
   useEffect(() => {
     const fetchParties = async () => {
@@ -553,24 +533,11 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
     fetchClients();
   }, []);
 
-  const formatDrawOptionLabel = (draw) => {
-    const title = draw?.title || "Draw";
-    const city = (draw?.city || "").trim();
-    const dateText = draw?.draw_date ? new Date(draw.draw_date).toLocaleDateString() : "";
-    return city ? `${title} - ${city} - ${dateText}` : `${title} - ${dateText}`;
+  const isDrawActive = (d) => {
+    return isDrawVisibleForSell(d);
   };
 
-  const isDrawActive = (d) => {
-    if (!d) return false;
-    if (d.isExpired) return false;
-    if (typeof d.remainingMs === 'number') return d.remainingMs > 0;
-    if (d.draw_date) {
-      const end = new Date(d.draw_date);
-      end.setHours(23, 59, 59, 999);
-      return end.getTime() >= Date.now();
-    }
-    return true;
-  };
+  const historyVisibleDraws = useMemo(() => draws.filter(isDrawVisibleForHistory), [draws]);
 
   const isSelectedDrawClosed = () => {
     if (!selectedDraw) return false;
@@ -4500,8 +4467,7 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
                   onChange={(e) => setImportDrawId(e.target.value)}
                 >
                   <option value="">-- Select Draw --</option>
-                  {draws
-                    .filter(isDrawActive)
+                  {historyVisibleDraws
                     .map(d => (
                       <option key={d._id} value={d._id}>
                         {formatDrawOptionLabel(d)}

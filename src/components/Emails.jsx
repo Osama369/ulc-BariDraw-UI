@@ -2,10 +2,17 @@ import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
 import { useSelector } from 'react-redux';
+import { isDrawVisibleForHistory, formatDrawOptionLabel } from '../utils/drawVisibility';
+import { useDrawsAutoSync } from '../hooks/useDrawsAutoSync';
 
 const Emails = () => {
   const userData = useSelector((s) => s.user);
-  const [draws, setDraws] = useState([]);
+  const token = userData?.token || localStorage.getItem('token') || localStorage.getItem('adminToken');
+  const { draws } = useDrawsAutoSync({
+    tokenCandidates: [token, localStorage.getItem('token'), localStorage.getItem('adminToken')],
+    filterFn: isDrawVisibleForHistory,
+    pollMs: 5000,
+  });
   const [parties, setParties] = useState([]);
   const [selectedDraw, setSelectedDraw] = useState('');
   const [selectedParty, setSelectedParty] = useState('');
@@ -19,17 +26,6 @@ const Emails = () => {
   const [demandLoading, setDemandLoading] = useState(false);
 
   useEffect(() => {
-    const fetchDraws = async () => {
-      try {
-        const token = localStorage.getItem('token');
-        const res = await axios.get('/api/v1/draws', { headers: { Authorization: token ? `Bearer ${token}` : undefined } });
-        setDraws(res.data.draws || res.data || []);
-      } catch (err) {
-        console.error('Failed to fetch draws', err);
-        setDraws([]);
-      }
-    };
-
     const fetchParties = async () => {
       try {
         const token = localStorage.getItem('token');
@@ -41,9 +37,17 @@ const Emails = () => {
       }
     };
 
-    fetchDraws();
     fetchParties();
   }, []);
+
+  useEffect(() => {
+    if (!selectedDraw) return;
+    const exists = draws.some((d) => String(d._id) === String(selectedDraw));
+    if (!exists) {
+      setSelectedDraw('');
+      toast('Selected draw changed. Please reselect draw.');
+    }
+  }, [draws, selectedDraw]);
 
   const loadArchives = async () => {
     try {
@@ -202,7 +206,7 @@ const Emails = () => {
           <select className="bg-gray-800 p-2 rounded w-full" value={selectedDraw} onChange={(e) => setSelectedDraw(e.target.value)}>
             <option value="">All draws</option>
             {draws.map(d => (
-              <option key={d._id} value={d._id}>{d.title ? `${d.title} - ${d.draw_date ? new Date(d.draw_date).toLocaleDateString() : ''}` : (d.draw_date ? new Date(d.draw_date).toLocaleDateString() : '')}</option>
+              <option key={d._id} value={d._id}>{formatDrawOptionLabel(d)}</option>
             ))}
           </select>
         </div>

@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { FaUser, FaEnvelope, FaPhone, FaCity, FaKey, FaEye, FaEyeSlash, FaIdBadge, FaMoneyBill, FaCalculator } from "react-icons/fa";
 import { toast } from "react-hot-toast";
 
-const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
+const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme, onCancel }) => {
   const [formData, setFormData] = useState({
     username: initialData.username || "",
     email: initialData.email || "",
@@ -80,10 +80,15 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
   // regenerateDealerId removed — dealerId must be entered manually
 
   return (
-    <form onSubmit={handleSubmit} className="w-full max-w-5xl p-6 rounded-lg shadow-md border border-gray-700" style={{ backgroundColor: theme === 'dark' ? '#1a202c' : '#fff', color: theme === 'dark' ? '#cbd5e0' : '#2d3748' }}>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+    <form
+      onSubmit={handleSubmit}
+      className="w-full max-w-5xl h-[calc(100vh-220px)] min-h-[520px] flex flex-col p-6 rounded-lg shadow-md border border-gray-700"
+      style={{ backgroundColor: theme === 'dark' ? '#1a202c' : '#fff', color: theme === 'dark' ? '#cbd5e0' : '#2d3748' }}
+    >
+      <div className="flex-1 min-h-0 overflow-y-auto app-scroll pr-1">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
+          <label className="font-medium flex items-center gap-2">
             <FaUser className="text-blue-500" /> Username:
           </label>
           <input
@@ -98,7 +103,7 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
+          <label className="font-medium flex items-center gap-2">
             <FaEnvelope className="text-blue-500" /> Email:
           </label>
           <input
@@ -113,7 +118,7 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
+          <label className="font-medium flex items-center gap-2">
             <FaPhone className="text-blue-500" /> Phone:
           </label>
           <input
@@ -128,7 +133,7 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
+          <label className="font-medium flex items-center gap-2">
             <FaCity className="text-blue-500" /> City:
           </label>
           <input
@@ -143,7 +148,7 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
+          <label className="font-medium flex items-center gap-2">
             <FaCalculator className="text-blue-500" /> Single Figure Commission:
           </label>
           <input
@@ -157,7 +162,7 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
+          <label className="font-medium flex items-center gap-2">
             <FaCalculator className="text-blue-500" /> Double Figure Commission:
           </label>
           <input
@@ -171,7 +176,7 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
+          <label className="font-medium flex items-center gap-2">
             <FaCalculator className="text-blue-500" /> Triple Figure Commission:
           </label>
           <input
@@ -185,7 +190,7 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
+          <label className="font-medium flex items-center gap-2">
             <FaCalculator className="text-blue-500" /> Four Figure Commission:
           </label>
           <input
@@ -200,8 +205,8 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
 
         {/* Dynamic prize multipliers for sections */}
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
-            <FaCalculator className="text-blue-500" /> HINSA Multiplier:
+          <label className="font-medium flex items-center gap-2">
+            <FaCalculator className="text-blue-500" /> Hinsa Prize:
           </label>
           <input
             type="number"
@@ -215,8 +220,8 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
-            <FaCalculator className="text-blue-500" /> AKRA Multiplier:
+          <label className="font-medium flex items-center gap-2">
+            <FaCalculator className="text-blue-500" /> Akra Prize:
           </label>
           <input
             type="number"
@@ -230,8 +235,8 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
-            <FaCalculator className="text-blue-500" /> TANDOLA Multiplier:
+          <label className="font-medium flex items-center gap-2">
+            <FaCalculator className="text-blue-500" /> Tandola Prize:
           </label>
           <input
             type="number"
@@ -245,8 +250,8 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
-            <FaCalculator className="text-blue-500" /> PANGORA Multiplier:
+          <label className="font-medium flex items-center gap-2">
+            <FaCalculator className="text-blue-500" /> Pangora Prize:
           </label>
           <input
             type="number"
@@ -260,7 +265,7 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
+          <label className="font-medium flex items-center gap-2">
             <FaCalculator className="text-blue-500" /> Hissa:
           </label>
           <input
@@ -274,7 +279,7 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
+          <label className="font-medium flex items-center gap-2">
             <FaIdBadge className="text-blue-500" /> Dealer ID:
           </label>
           <div className="flex gap-2">
@@ -292,7 +297,7 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
+          <label className="font-medium flex items-center gap-2">
             <FaMoneyBill className="text-blue-500" /> Balance:
           </label>
           <input
@@ -306,7 +311,7 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
+          <label className="font-medium flex items-center gap-2">
             <FaKey className="text-blue-500" /> Password:
           </label>
           <div className="relative">
@@ -330,7 +335,7 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
         </div>
 
         <div className="space-y-2">
-          <label className="block font-medium flex items-center gap-2">
+          <label className="font-medium flex items-center gap-2">
             <FaKey className="text-blue-500" /> Confirm Password:
           </label>
           <div className="relative">
@@ -353,35 +358,42 @@ const UserForm = ({ onSubmit, initialData = {}, isEditing = false, theme }) => {
           </div>
         </div>
 
-        {/* User status (active/inactive) toggle - Only show when editing */}
-        {isEditing && (
-          <div className="space-y-2">
-            <label className="block font-medium flex items-center gap-2">
-              Status:
-            </label>
-            <div className="flex items-center">
-              <input
-                type="checkbox"
-                name="isActive"
-                checked={formData.isActive}
-                onChange={handleChange}
-                className="h-4 w-4 text-blue-600 focus:ring focus:ring-blue-300"
-              />
-              <span className="ml-2 text-sm">
-                {formData.isActive ? "Active" : "Inactive"}
-              </span>
+          {/* User status (active/inactive) toggle - Only show when editing */}
+          {isEditing && (
+            <div className="space-y-2">
+              <label className="font-medium flex items-center gap-2">
+                Status:
+              </label>
+              <div className="flex items-center">
+                <input
+                  type="checkbox"
+                  name="isActive"
+                  checked={formData.isActive}
+                  onChange={handleChange}
+                  className="h-4 w-4 text-blue-600 focus:ring focus:ring-blue-300"
+                />
+                <span className="ml-2 text-sm">
+                  {formData.isActive ? "Active" : "Inactive"}
+                </span>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       <div
-        className="mt-8 pt-4 flex justify-end space-x-3 border-t border-gray-700 sticky bottom-0"
+        className="mt-4 pt-4 flex justify-end space-x-3 border-t border-gray-700 shrink-0"
         style={{ backgroundColor: theme === 'dark' ? '#1a202c' : '#fff' }}
       >
         <button
           type="button"
-          onClick={() => window.history.back()}
+          onClick={() => {
+            if (typeof onCancel === 'function') {
+              onCancel();
+            } else {
+              window.history.back();
+            }
+          }}
           className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-500"
         >
           Cancel

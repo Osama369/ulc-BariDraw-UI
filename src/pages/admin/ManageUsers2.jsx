@@ -14,7 +14,6 @@ const ManageUsers = () => {
 
   const fetchUsers = useCallback(async () => {
     try {
-      dispatch(showLoading());
       setError(null);
       setIsLoading(true);
       
@@ -32,7 +31,6 @@ const ManageUsers = () => {
       setUsers([]); // Reset to empty array on error
     } finally {
       setIsLoading(false);
-      dispatch(hideLoading());
     }
   }, [dispatch]);
 
@@ -107,11 +105,8 @@ const ManageUsers = () => {
   };
 
   useEffect(() => {
-    const controller = new AbortController();
-    
     fetchUsers();
-    console.log("Backend returning:", users.slice(0, 2)); 
-    return () => controller.abort(); // Cleanup on unmount
+    // Keep initial data loading local to avoid route remount loops caused by global loading overlay.
   }, [fetchUsers]);
 
   return (

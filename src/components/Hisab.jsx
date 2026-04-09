@@ -4,6 +4,8 @@ import jsPDF from 'jspdf';
 import { FiMail } from 'react-icons/fi';
 import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
+import { isDrawVisibleForHistory, formatDrawOptionLabel } from '../utils/drawVisibility';
+import { useDrawsAutoSync } from '../hooks/useDrawsAutoSync';
 
 const Hisab = () => {
     const userData = useSelector((state) => state.user);
@@ -12,7 +14,11 @@ const Hisab = () => {
     // State variables for overlimit preview
     const [drawDate, setDrawDate] = useState(new Date().toISOString().split('T')[0]);
     const [drawTime, setDrawTime] = useState("11 AM");
-    const [draws, setDraws] = useState([]);
+    const { draws } = useDrawsAutoSync({
+        tokenCandidates: [token, localStorage.getItem('token'), localStorage.getItem('adminToken')],
+        filterFn: isDrawVisibleForHistory,
+        pollMs: 5000,
+    });
     const [selectedDraw, setSelectedDraw] = useState(null);
     const [parties, setParties] = useState([]);
     const [selectedParty, setSelectedParty] = useState(null);
@@ -36,33 +42,18 @@ const Hisab = () => {
     const [saveDemandLoading, setSaveDemandLoading] = useState(false);
     const [dbfMode, setDbfMode] = useState('Mohsin'); // DBF mode: 'Mohsin' (default) or 'RLC'
 
-    // Fetch draws on mount
     useEffect(() => {
-        const fetchDraws = async () => {
-            try {
-                const normalizeAuthToken = (raw) => {
-                    if (raw == null) return null;
-                    const s = String(raw).trim();
-                    if (!s || s === 'null' || s === 'undefined') return null;
-                    const t = /^bearer\s+/i.test(s) ? s.replace(/^bearer\s+/i, '').trim() : s;
-                    if (!t || t === 'null' || t === 'undefined') return null;
-                    if (t.split('.').length !== 3) return null;
-                    return t;
-                };
-
-                const storedAdminToken = localStorage.getItem('adminToken');
-                const storedUserToken = localStorage.getItem('token');
-                const authToken = normalizeAuthToken(token) || normalizeAuthToken(storedUserToken) || normalizeAuthToken(storedAdminToken);
-                const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
-                const res = await axios.get('/api/v1/draws', { headers });
-                setDraws(res.data.draws || res.data || []);
-            } catch (err) {
-                console.error('Failed to fetch draws', err);
-                setDraws([]);
-            }
-        };
-        fetchDraws();
-    }, [token]);
+        if (!selectedDraw?._id) return;
+        const latest = draws.find((d) => String(d._id) === String(selectedDraw._id));
+        if (!latest) {
+            setSelectedDraw(null);
+            toast('Selected draw changed. Please reselect draw.');
+            return;
+        }
+        if (latest !== selectedDraw) {
+            setSelectedDraw(latest);
+        }
+    }, [draws, selectedDraw]);
 
     // Helper: normalize UID keys (string and numeric form)
     const normalizeUid = (uid) => {
@@ -911,7 +902,7 @@ const Hisab = () => {
                                     <option value="">-- Select draw --</option>
                                     {draws.map(d => (
                                         <option key={d._id} value={d._id}>
-                                            {`${d.title ? d.title + ' - ' : ''}${new Date(d.draw_date).toLocaleDateString()} ${d.isExpired ? '(Closed)' : ''}`}
+                                            {formatDrawOptionLabel(d)}
                                         </option>
                                     ))}
                                 </select>

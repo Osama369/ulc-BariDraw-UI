@@ -4,12 +4,18 @@ import jsPDF from 'jspdf';
 import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
 import 'jspdf-autotable';
+import { isDrawVisibleForHistory, formatDrawOptionLabel } from '../utils/drawVisibility';
+import { useDrawsAutoSync } from '../hooks/useDrawsAutoSync';
 
 const TotalSaleReport = () => {
   const userData = useSelector((s) => s.user);
   const role = userData?.user?.role;
   const currentUserId = userData?.user?._id;
-  const [draws, setDraws] = useState([]);
+  const { draws } = useDrawsAutoSync({
+    tokenCandidates: [userData?.token, localStorage.getItem('token'), localStorage.getItem('adminToken')],
+    filterFn: isDrawVisibleForHistory,
+    pollMs: 5000,
+  });
   const [selectedDraw, setSelectedDraw] = useState(null);
   const [drawDate, setDrawDate] = useState(new Date().toISOString().split('T')[0]);
   const [drawTime, setDrawTime] = useState('11 AM');
@@ -19,29 +25,17 @@ const TotalSaleReport = () => {
   const [winningNumbers, setWinningNumbers] = useState([]);
 
   useEffect(() => {
-    const fetchDraws = async () => {
-      try {
-        const normalizeAuthToken = (raw) => {
-          if (raw == null) return null;
-          const s = String(raw).trim();
-          if (!s || s === 'null' || s === 'undefined') return null;
-          const t = /^bearer\s+/i.test(s) ? s.replace(/^bearer\s+/i, '').trim() : s;
-          if (!t || t === 'null' || t === 'undefined') return null;
-          if (t.split('.').length !== 3) return null;
-          return t;
-        };
-
-        const authToken = normalizeAuthToken(userData?.token) || normalizeAuthToken(localStorage.getItem('token')) || normalizeAuthToken(localStorage.getItem('adminToken'));
-        const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
-        const res = await axios.get('/api/v1/draws', { headers });
-        setDraws(res.data.draws || res.data || []);
-      } catch (err) {
-        console.error('Failed to fetch draws', err);
-        setDraws([]);
-      }
-    };
-    fetchDraws();
-  }, [userData]);
+    if (!selectedDraw?._id) return;
+    const latest = draws.find((d) => String(d._id) === String(selectedDraw._id));
+    if (!latest) {
+      setSelectedDraw(null);
+      toast('Selected draw changed. Please reselect draw.');
+      return;
+    }
+    if (latest !== selectedDraw) {
+      setSelectedDraw(latest);
+    }
+  }, [draws, selectedDraw]);
 
   const fetchCombinedVoucherData = async (cat) => {
     try {
@@ -297,7 +291,7 @@ const TotalSaleReport = () => {
           <select className="bg-gray-800 p-2 rounded w-full" value={selectedDraw?._id || ''} onChange={(e) => setSelectedDraw(draws.find(d => d._id === e.target.value) || null)}>
             <option value="">-- Select draw date --</option>
             {draws.map(d => (
-              <option key={d._id} value={d._id}>{d.title ? `${d.title} - ${d.draw_date ? new Date(d.draw_date).toLocaleDateString() : ''}` : (d.draw_date ? new Date(d.draw_date).toLocaleDateString() : '')}</option>
+              <option key={d._id} value={d._id}>{formatDrawOptionLabel(d)}</option>
             ))}
           </select>
         </div>

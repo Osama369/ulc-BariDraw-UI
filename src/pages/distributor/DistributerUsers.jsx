@@ -3,8 +3,8 @@ import axios from 'axios';
 import { useDispatch } from 'react-redux';
 import { showLoading, hideLoading } from '../../redux/features/alertSlice';
 import toast from 'react-hot-toast';
-import { Link } from 'react-router-dom';
 import { FaEdit, FaTrash, FaToggleOn, FaToggleOff, FaUserPlus } from 'react-icons/fa';
+import UserForm from '../../components/UserForm';
 
 const DistributerUsers = ({ onEditUser }) => {
   const [users, setUsers] = useState([]);
@@ -12,6 +12,23 @@ const DistributerUsers = ({ onEditUser }) => {
   const [error, setError] = useState(null);
   const dispatch = useDispatch();
   const isMounted = useRef(true);
+  const [showUserModal, setShowUserModal] = useState(false);
+  const [editingUser, setEditingUser] = useState(null);
+
+  const closeUserModal = () => {
+    setShowUserModal(false);
+    setEditingUser(null);
+  };
+
+  const openCreateModal = () => {
+    setEditingUser(null);
+    setShowUserModal(true);
+  };
+
+  const openEditModal = (user) => {
+    setEditingUser(user || null);
+    setShowUserModal(true);
+  };
 
   // Fetch users created by the distributor
   const fetchDistributorUsers = async () => {
@@ -115,6 +132,34 @@ const DistributerUsers = ({ onEditUser }) => {
     }
   };
 
+  const handleSaveUser = async (userData) => {
+    try {
+      const token = localStorage.getItem('token');
+      if (!token) {
+        toast.error('You must be logged in');
+        return;
+      }
+
+      if (editingUser && editingUser._id) {
+        await axios.patch(`/api/v1/users/distributor-update/${editingUser._id}`, userData, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        toast.success('Client updated successfully');
+      } else {
+        await axios.post('/api/v1/users/distributor-create-user', userData, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        toast.success('Client created successfully');
+      }
+
+      closeUserModal();
+      fetchDistributorUsers();
+    } catch (error) {
+      console.error('Error saving client:', error);
+      toast.error(error.response?.data?.error || error.response?.data?.message || 'Failed to save client');
+    }
+  };
+
   useEffect(() => {
     // Set up cleanup function
     isMounted.current = true;
@@ -130,6 +175,13 @@ const DistributerUsers = ({ onEditUser }) => {
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold">Manage Your Users</h1>
         <div className="flex gap-2">
+          <button
+            onClick={openCreateModal}
+            className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 inline-flex items-center gap-2"
+          >
+            <FaUserPlus size={14} />
+            Add Client
+          </button>
           <button 
             onClick={fetchDistributorUsers}
             className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
@@ -218,13 +270,13 @@ const DistributerUsers = ({ onEditUser }) => {
                           <FaEdit size={16} />
                         </button>
                       ) : (
-                        <Link
-                          to={`/edit-user/${user._id}`}
+                        <button
+                          onClick={() => openEditModal(user)}
                           className="text-blue-600 hover:text-blue-800"
                           title="Edit user"
                         >
                           <FaEdit size={16} />
-                        </Link>
+                        </button>
                       )}
                       <button
                         onClick={() => deleteUser(user._id)}
@@ -239,6 +291,29 @@ const DistributerUsers = ({ onEditUser }) => {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {showUserModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-lg w-full max-w-6xl max-h-[95vh] overflow-hidden text-gray-100">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-700">
+              <h2 className="text-xl font-semibold">
+                {editingUser ? 'Edit Client' : 'Create New Client'}
+              </h2>
+              <button onClick={closeUserModal} className="text-gray-400 hover:text-gray-200">✕</button>
+            </div>
+
+            <div className="p-4">
+              <UserForm
+                initialData={editingUser || {}}
+                isEditing={!!editingUser}
+                onSubmit={handleSaveUser}
+                onCancel={closeUserModal}
+                theme="dark"
+              />
+            </div>
+          </div>
         </div>
       )}
     </div>

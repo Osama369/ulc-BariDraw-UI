@@ -7,6 +7,8 @@ import toast from 'react-hot-toast';
 const initialForm = {
   title: '',
   category: 'GTL',
+  serialNo: '',
+  drawNo: '',
   draw_date: '',
   draw_time: '12:00',
   city: '',
@@ -86,12 +88,18 @@ const DrawList = () => {
     return `${days}d : ${pad(hours)}h : ${pad(minutes)}m : ${pad(seconds)}s`;
   };
 
+  const formatSerialDisplay = (value) => {
+    const n = Number(value);
+    if (!Number.isInteger(n) || n <= 0) return '';
+    return String(n).padStart(2, '0');
+  };
+
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
     // If category changed to GTL, clear the city field
     if (name === 'category') {
       if (value === 'GTL') {
-        setForm((prev) => ({ ...prev, category: value, city: '' }));
+        setForm((prev) => ({ ...prev, category: value, city: '', drawNo: '' }));
         return;
       }
       setForm((prev) => ({ ...prev, [name]: value }));
@@ -108,6 +116,10 @@ const DrawList = () => {
       toast.error('Please provide title and draw date');
       return;
     }
+    if (form.category === 'PAKISTAN' && (!form.drawNo || !Number.isInteger(Number(form.drawNo)) || Number(form.drawNo) <= 0)) {
+      toast.error('Draw No is required for PAKISTAN and must be a positive integer');
+      return;
+    }
 
     try {
       dispatch(showLoading());
@@ -120,6 +132,15 @@ const DrawList = () => {
         const timePart = form.draw_time || '12:00';
         // create ISO string local timezone (YYYY-MM-DDTHH:MM:00)
         payload.draw_date = `${form.draw_date}T${timePart}:00`;
+      }
+      // Serial No is auto-managed by backend (year-wise sequence)
+      delete payload.serialNo;
+      if (form.category === 'PAKISTAN') {
+        payload.drawNo = Number(form.drawNo);
+      } else {
+        delete payload.drawNo;
+        delete payload.prize;
+        delete payload.city;
       }
 
       if (editingId) {
@@ -140,7 +161,7 @@ const DrawList = () => {
       setEditingId(null);
     } catch (err) {
       console.error(err);
-      toast.error(err.response?.data?.message || 'Failed to save draw');
+      toast.error(err.response?.data?.error || err.response?.data?.message || 'Failed to save draw');
     } finally {
       dispatch(hideLoading());
     }
@@ -151,6 +172,8 @@ const DrawList = () => {
     setForm({
       title: draw.title || '',
       category: draw.category || 'GTL',
+      serialNo: draw.serialNo != null ? String(draw.serialNo) : '',
+      drawNo: draw.drawNo != null ? String(draw.drawNo) : '',
       draw_date: draw.draw_date ? draw.draw_date.split('T')[0] : '',
       draw_time: draw.draw_date ? (draw.draw_date.split('T')[1] || '12:00:00').slice(0,5) : '12:00',
       city: draw.city || '',
@@ -229,7 +252,16 @@ const DrawList = () => {
       </div>
 
       <form className="bg-white p-4 rounded shadow mb-6" onSubmit={handleSubmit}>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm">#Serial NO</label>
+            <input
+              value={formatSerialDisplay(form.serialNo)}
+              readOnly
+              className="w-full border p-2 rounded bg-gray-100 text-gray-700"
+              placeholder=""
+            />
+          </div>
           <div>
             <label className="block text-sm">Title</label>
             <input name="title" value={form.title} onChange={handleChange} className="w-full border p-2 rounded" />
@@ -241,6 +273,38 @@ const DrawList = () => {
               <option value="PAKISTAN">PAKISTAN</option>
             </select>
           </div>
+
+          {form.category === 'PAKISTAN' && (
+            <div>
+              <label className="block text-sm">Prize (for PAKISTAN)</label>
+              <input
+                name="prize"
+                type="number"
+                step="0.01"
+                value={form.prize}
+                onChange={handleChange}
+                className="w-full border p-2 rounded"
+                placeholder="Enter bond prize"
+              />
+            </div>
+          )}
+
+          {form.category === 'PAKISTAN' && (
+            <div>
+              <label className="block text-sm">Draw No (PrizeBond)</label>
+              <input
+                name="drawNo"
+                type="number"
+                min="1"
+                step="1"
+                value={form.drawNo}
+                onChange={handleChange}
+                className="w-full border p-2 rounded"
+                placeholder="Required for PAKISTAN"
+              />
+            </div>
+          )}
+
           <div>
             <label className="block text-sm">Draw Date</label>
             <div className="flex gap-2">
@@ -248,23 +312,14 @@ const DrawList = () => {
               <input type="time" name="draw_time" value={form.draw_time} onChange={handleChange} className="w-32 border p-2 rounded" />
             </div>
           </div>
-          <div>
-            <label className="block text-sm">City</label>
-            <input name="city" value={form.city} onChange={handleChange} className="w-full border p-2 rounded" disabled={form.category === 'GTL'} />
-          </div>
-          <div>
-            <label className="block text-sm">Prize (for PAKISTAN)</label>
-            <input
-              name="prize"
-              type="number"
-              step="0.01"
-              value={form.prize}
-              onChange={handleChange}
-              className="w-full border p-2 rounded"
-              disabled={form.category !== 'PAKISTAN'}
-              placeholder={form.category === 'PAKISTAN' ? 'Enter bond prize' : 'N/A for GTL'}
-            />
-          </div>
+
+          {form.category === 'PAKISTAN' && (
+            <div>
+              <label className="block text-sm">City</label>
+              <input name="city" value={form.city} onChange={handleChange} className="w-full border p-2 rounded" />
+            </div>
+          )}
+
           <div className="flex items-center gap-2">
             <input id="isActive" type="checkbox" name="isActive" checked={form.isActive} onChange={handleChange} />
             <label htmlFor="isActive" className="text-sm">Active</label>
@@ -294,30 +349,36 @@ const DrawList = () => {
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
+              <th className="px-4 py-2 text-left text-sm">Year</th>
+              <th className="px-4 py-2 text-left text-sm">Serial No</th>
               <th className="px-4 py-2 text-left text-sm">Title</th>
               <th className="px-4 py-2 text-left text-sm">Category</th>
+              <th className="px-4 py-2 text-left text-sm">Prize (for PAKISTAN)</th>
+              <th className="px-4 py-2 text-left text-sm">Draw No (PrizeBond)</th>
               <th className="px-4 py-2 text-left text-sm">Draw Date</th>
               <th className="px-4 py-2 text-left text-sm">Expires In</th>
               <th className="px-4 py-2 text-left text-sm">City</th>
-              <th className="px-4 py-2 text-left text-sm">Prize</th>
               <th className="px-4 py-2 text-left text-sm">Active</th>
               <th className="px-4 py-2 text-sm">Actions</th>
             </tr>
           </thead>
           <tbody className="bg-white">
             {loadingLocal ? (
-              <tr><td colSpan={7} className="p-4 text-center">Loading...</td></tr>
+              <tr><td colSpan={11} className="p-4 text-center">Loading...</td></tr>
             ) : (() => {
               const filtered = filterCategory === 'ALL' ? draws : draws.filter(x => x.category === filterCategory);
               return filtered && filtered.length > 0 ? (
                 filtered.map(d => (
                 <tr key={d._id} className="border-t">
+                  <td className="px-4 py-2">{d.drawYear || (d.draw_date ? new Date(d.draw_date).getFullYear() : '-')}</td>
+                  <td className="px-4 py-2">{Number.isInteger(Number(d.serialNo)) ? String(d.serialNo).padStart(2, '0') : '-'}</td>
                   <td className="px-4 py-2">{d.title}</td>
                   <td className="px-4 py-2">{d.category}</td>
+                  <td className="px-4 py-2">{d.category === 'PAKISTAN' && d.prize != null ? d.prize : '-'}</td>
+                  <td className="px-4 py-2">{d.category === 'PAKISTAN' ? (d.drawNo ?? '-') : '-'}</td>
                     <td className="px-4 py-2">{d.draw_date ? d.draw_date.split('T')[0] : ''}</td>
                     <td className="px-4 py-2">{formatRemaining(remainingMap[d._id] ?? (d.remainingMs ?? 0))}</td>
-                  <td className="px-4 py-2">{d.city}</td>
-                  <td className="px-4 py-2">{d.category === 'PAKISTAN' && d.prize != null ? d.prize : '-'}</td>
+                  <td className="px-4 py-2">{d.category === 'PAKISTAN' ? (d.city || '-') : '-'}</td>
                     <td className="px-4 py-2">{d.isActive ? 'Yes' : 'No'}</td>
                   <td className="px-4 py-2">
                     <button className="text-blue-600 mr-2" onClick={() => handleEdit(d)}>Edit</button>
@@ -330,7 +391,7 @@ const DrawList = () => {
                 </tr>
                 ))
               ) : (
-                <tr><td colSpan={7} className="p-4 text-center text-sm text-gray-600">No draws found.</td></tr>
+                <tr><td colSpan={11} className="p-4 text-center text-sm text-gray-600">No draws found.</td></tr>
               );
             })()
             }

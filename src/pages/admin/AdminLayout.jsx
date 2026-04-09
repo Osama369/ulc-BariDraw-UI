@@ -5,12 +5,12 @@ import LogoutButton from '../../components/LogoutButton';
 
 const AdminLayout = () => {
   return (
-    <div className="flex h-screen">
+    <div className="flex h-screen min-h-0">
       {/* Sidebar */}
       <Sidebar />
 
       {/* Main Content */}
-      <div className="flex flex-col flex-grow">
+      <div className="flex flex-col flex-grow min-h-0">
         {/* Header */}
         <header className="bg-white shadow-sm py-4 px-6 flex justify-between items-center">
           <h1 className="text-xl font-semibold text-gray-800">Admin Dashboard</h1>
@@ -19,7 +19,7 @@ const AdminLayout = () => {
             <LogoutButton />
           </div>
         </header>
-        <div className="flex-1 p-6 bg-gray-100">
+        <div className="flex-1 min-h-0 overflow-y-auto app-scroll p-6 bg-gray-100">
           <Outlet />
         </div>
       </div>

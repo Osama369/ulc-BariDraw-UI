@@ -4,6 +4,8 @@ import jsPDF from 'jspdf';
 import { useSelector } from 'react-redux';
 // import { toast } from 'react-toastify';
 import toast from 'react-hot-toast';
+import { isDrawVisibleForHistory, formatDrawOptionLabel } from '../utils/drawVisibility';
+import { useDrawsAutoSync } from '../hooks/useDrawsAutoSync';
 
 const Reports = () => {
   const userData = useSelector((state) => state.user);
@@ -15,7 +17,11 @@ const Reports = () => {
   const selectedClientName = (clients.find(c => String(c._id) === String(selectedClient))?.username) || userData?.user.username;
   const [drawDate, setDrawDate] = useState(new Date().toISOString().split('T')[0]);
   const [drawTime, setDrawTime] = useState('11 AM');
-  const [draws, setDraws] = useState([]);
+  const { draws } = useDrawsAutoSync({
+    tokenCandidates: [token, localStorage.getItem('token'), localStorage.getItem('adminToken')],
+    filterFn: isDrawVisibleForHistory,
+    pollMs: 5000,
+  });
   const [selectedDraw, setSelectedDraw] = useState(null);
   const [drawRemainingMs, setDrawRemainingMs] = useState(null);
   const [entries, setEntries] = useState([]);
@@ -62,33 +68,18 @@ const Reports = () => {
     }
   }, [drawDate]);
 
-  // Fetch admin-managed draws for draw selection
   useEffect(() => {
-    const fetchDraws = async () => {
-      try {
-        const normalizeAuthToken = (raw) => {
-          if (raw == null) return null;
-          const s = String(raw).trim();
-          if (!s || s === 'null' || s === 'undefined') return null;
-          const t = /^bearer\s+/i.test(s) ? s.replace(/^bearer\s+/i, '').trim() : s;
-          if (!t || t === 'null' || t === 'undefined') return null;
-          if (t.split('.').length !== 3) return null;
-          return t;
-        };
-
-        const storedAdminToken = localStorage.getItem('adminToken');
-        const storedUserToken = localStorage.getItem('token');
-        const authToken = normalizeAuthToken(token) || normalizeAuthToken(storedUserToken) || normalizeAuthToken(storedAdminToken);
-        const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
-        const res = await axios.get('/api/v1/draws', { headers });
-        setDraws(res.data.draws || res.data || []);
-      } catch (err) {
-        console.error('Failed to fetch draws', err);
-        setDraws([]);
-      }
-    };
-    fetchDraws();
-  }, [token]);
+    if (!selectedDraw?._id) return;
+    const latest = draws.find((d) => String(d._id) === String(selectedDraw._id));
+    if (!latest) {
+      setSelectedDraw(null);
+      toast('Selected draw changed. Please reselect draw.');
+      return;
+    }
+    if (latest !== selectedDraw) {
+      setSelectedDraw(latest);
+    }
+  }, [draws, selectedDraw]);
 
   // Update remaining time until selected draw closes every second
   useEffect(() => {
@@ -224,15 +215,6 @@ const Reports = () => {
       return `${base}${selectedDraw.isExpired ? ' (Closed)' : ''}`;
     }
     return includeTimeFallback ? `${drawDate} ${drawTime}` : `${drawDate}`;
-  };
-
-  const formatDrawOptionLabel = (draw) => {
-    const title = draw?.title || "Draw";
-    const city = (draw?.city || "").trim();
-    const dateText = draw?.draw_date ? new Date(draw.draw_date).toLocaleDateString() : "";
-    const closedText = draw?.isExpired ? " (Closed)" : "";
-    const base = city ? `${title} - ${city} - ${dateText}` : `${title} - ${dateText}`;
-    return `${base}${closedText}`;
   };
 
   const checkPositionalMatch = (entry, winningNumber) => {
