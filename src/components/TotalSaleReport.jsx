@@ -14,7 +14,7 @@ const TotalSaleReport = () => {
   const { draws } = useDrawsAutoSync({
     tokenCandidates: [userData?.token, localStorage.getItem('token'), localStorage.getItem('adminToken')],
     filterFn: isDrawVisibleForHistory,
-    pollMs: 5000,
+    pollMs: 30000,
   });
   const [selectedDraw, setSelectedDraw] = useState(null);
   const [drawDate, setDrawDate] = useState(new Date().toISOString().split('T')[0]);

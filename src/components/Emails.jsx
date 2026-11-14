@@ -11,7 +11,7 @@ const Emails = () => {
   const { draws } = useDrawsAutoSync({
     tokenCandidates: [token, localStorage.getItem('token'), localStorage.getItem('adminToken')],
     filterFn: isDrawVisibleForHistory,
-    pollMs: 5000,
+    pollMs: 30000,
   });
   const [parties, setParties] = useState([]);
   const [selectedDraw, setSelectedDraw] = useState('');
@@ -24,6 +24,20 @@ const Emails = () => {
   const [demandPrizeType, setDemandPrizeType] = useState('Hinsa');
   const [demandDocs, setDemandDocs] = useState([]);
   const [demandLoading, setDemandLoading] = useState(false);
+
+  // In-page confirm box (browser confirm() popups are blocked in some browsers).
+  const [confirmBox, setConfirmBox] = useState(null); // { title, rows, warn, okLabel, onConfirm }
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const runConfirm = async () => {
+    if (!confirmBox) return;
+    setConfirmBusy(true);
+    try {
+      await confirmBox.onConfirm();
+    } finally {
+      setConfirmBusy(false);
+      setConfirmBox(null);
+    }
+  };
 
   useEffect(() => {
     const fetchParties = async () => {
@@ -99,8 +113,17 @@ const Emails = () => {
     if (!selectedDraw || !selectedParty) {
       return toast.error('Select draw and party first');
     }
-    const ok = window.confirm('Delete all demand records for this draw, party and prize type?');
-    if (!ok) return;
+    const partyName = parties.find((p) => String(p._id) === String(selectedParty))?.username || 'this party';
+    setConfirmBox({
+      title: 'Reset demand?',
+      rows: [['Party', partyName], ['Prize type', demandPrizeType]],
+      warn: 'All saved demand for this draw, party and prize type will be deleted.',
+      okLabel: 'Reset demand',
+      onConfirm: resetDemandNow,
+    });
+  };
+
+  const resetDemandNow = async () => {
     try {
       setDemandLoading(true);
       const token = localStorage.getItem('token');
@@ -168,8 +191,24 @@ const Emails = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDraw, selectedParty, activeTab]);
 
-  const handleDelete = async (id) => {
-    if (!window.confirm('Delete this archived email? This will remove the file and unlock related data.')) return;
+  const handleDelete = (archive) => {
+    const total = (archive.overlimitRecords || []).reduce((t, r) => t + (Number(r.fPrize) || 0) + (Number(r.sPrize) || 0), 0);
+    setConfirmBox({
+      title: 'Delete this email?',
+      rows: [
+        ['File', archive.fileName],
+        ['Invoice', archive.invoiceNo ?? '—'],
+        ['Party', parties.find((p) => String(p._id) === String(archive.partyId))?.username || '—'],
+        ['Numbers', archive.recordCount || 0],
+        ['Total', total.toLocaleString('en-PK')],
+      ],
+      warn: 'The ZIP and invoice are removed. These overlimit amounts unlock and will show again in Purchase Department on the next Analyze.',
+      okLabel: 'Delete email',
+      onConfirm: () => deleteArchiveNow(archive._id),
+    });
+  };
+
+  const deleteArchiveNow = async (id) => {
     try {
       const token = localStorage.getItem('token');
       await axios.delete(`/api/v1/archives/${id}`, { headers: { Authorization: token ? `Bearer ${token}` : undefined } });
@@ -177,7 +216,7 @@ const Emails = () => {
       setArchives((prev) => prev.filter(a => String(a._id) !== String(id)));
     } catch (err) {
       console.error('Delete failed', err);
-      toast.error('Failed to delete archive');
+      toast.error(err?.response?.data?.error || 'Failed to delete archive');
     }
   };
 
@@ -281,7 +320,7 @@ const Emails = () => {
                     <td className="py-2">{a.createdAt ? new Date(a.createdAt).toLocaleString() : ''}</td>
                     <td className="py-2">
                       <button className="text-blue-400 mr-3" onClick={() => handleDownload(a)}>Download</button>
-                      <button className="text-red-400" onClick={() => handleDelete(a._id)}>Delete</button>
+                      <button className="text-red-400" onClick={() => handleDelete(a)}>Delete</button>
                     </td>
                   </tr>
                 ))}
@@ -320,6 +359,33 @@ const Emails = () => {
               </tbody>
             </table>
           )}
+        </div>
+      )}
+
+      {confirmBox && (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4"
+          onMouseDown={(e) => { if (e.target === e.currentTarget && !confirmBusy) setConfirmBox(null); }}
+          onKeyDown={(e) => { if (e.key === 'Escape' && !confirmBusy) setConfirmBox(null); }}
+        >
+          <div role="dialog" aria-modal="true" aria-labelledby="em-confirm-title" className="flex w-full max-w-md flex-col gap-3.5 rounded-xl border border-gray-700 bg-gray-800 p-5">
+            <h3 id="em-confirm-title" className="text-lg font-bold">{confirmBox.title}</h3>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
+              {confirmBox.rows.map(([k, v]) => (
+                <React.Fragment key={k}>
+                  <dt className="text-gray-400">{k}</dt>
+                  <dd className="break-all text-right font-semibold tabular-nums">{v}</dd>
+                </React.Fragment>
+              ))}
+            </dl>
+            <p className="rounded-lg bg-amber-400/10 px-3 py-2 text-[12.5px] text-amber-300">{confirmBox.warn}</p>
+            <div className="flex justify-end gap-2">
+              <button type="button" disabled={confirmBusy} onClick={() => setConfirmBox(null)} className="rounded-lg border border-gray-600 px-4 py-2 font-semibold hover:bg-gray-700 disabled:opacity-50">Cancel</button>
+              <button type="button" autoFocus disabled={confirmBusy} onClick={runConfirm} className="inline-flex min-w-[140px] items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2 font-semibold text-white hover:bg-red-700 disabled:opacity-70">
+                {confirmBusy ? <><span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" aria-hidden="true" />Working…</> : confirmBox.okLabel}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

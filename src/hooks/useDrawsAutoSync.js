@@ -37,7 +37,7 @@ const buildDrawSignature = (draws) => {
 export const useDrawsAutoSync = ({
   tokenCandidates = [],
   filterFn = null,
-  pollMs = 5000,
+  pollMs = 30000,
   enabled = true,
 }) => {
   const [draws, setDraws] = useState([]);
@@ -87,7 +87,9 @@ export const useDrawsAutoSync = ({
 
       initializedRef.current = true;
     } catch (err) {
-      if (signatureRef.current !== '__FETCH_ERROR__') {
+      // A slow or failed poll must not empty the draw list (that would drop the
+      // selected draw mid-entry). Only clear it before the first successful load.
+      if (!initializedRef.current && signatureRef.current !== '__FETCH_ERROR__') {
         signatureRef.current = '__FETCH_ERROR__';
         setDraws([]);
       }

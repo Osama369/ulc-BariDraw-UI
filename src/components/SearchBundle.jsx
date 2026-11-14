@@ -18,7 +18,7 @@ const SearchBundle = () => {
   const { draws } = useDrawsAutoSync({
     tokenCandidates: [token, localStorage.getItem('token'), localStorage.getItem('adminToken')],
     filterFn: isDrawVisibleForHistory,
-    pollMs: 5000,
+    pollMs: 30000,
   });
 
   useEffect(() => {

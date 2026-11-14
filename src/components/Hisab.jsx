@@ -1,1339 +1,712 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import jsPDF from 'jspdf';
-import { FiMail } from 'react-icons/fi';
 import { useSelector } from 'react-redux';
 import toast from 'react-hot-toast';
+import { FiMail, FiSave, FiDownload, FiFileText, FiRefreshCw } from 'react-icons/fi';
 import { isDrawVisibleForHistory, formatDrawOptionLabel } from '../utils/drawVisibility';
 import { useDrawsAutoSync } from '../hooks/useDrawsAutoSync';
+
+// Purchase Department: split the dealer's combined sale for one draw into
+// demand (kept, up to the limits) and overlimit (sent to a party by email).
+// Flow: 1) Analyze  2) Save Demand  3) Create Email (only after demand is saved).
+
+const PRIZE_TYPES = ['Hinsa', 'Akra', 'Tandola', 'Pangora', 'All'];
+const DBF_MODES = ['Mohsin', 'RLC'];
+
+const uidKey = (uid) => String(uid ?? '').trim();
+const fmt = (n) => Number(n || 0).toLocaleString('en-PK');
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+const matchesPrizeType = (number, type) => {
+    if (type === 'All') return true;
+    const n = String(number || '');
+    const plus = n.split('+').length - 1;
+    if (type === 'Hinsa') return /^\d{1}$/.test(n) || (n.includes('+') && n.length === 2) || (plus === 2 && n.length === 3) || (plus === 3 && n.length === 4);
+    if (type === 'Akra') return /^\d{2}$/.test(n) || (n.includes('+') && n.length === 3) || (plus === 2 && n.length === 4);
+    if (type === 'Tandola') return /^\d{3}$/.test(n) || (n.length === 4 && n.includes('+'));
+    if (type === 'Pangora') return /^\d{4}$/.test(n);
+    return false;
+};
+
+const isDrawClosed = (draw) => {
+    if (!draw) return false;
+    if (draw.isExpired) return true;
+    const t = new Date(draw.draw_date).getTime();
+    return Number.isFinite(t) && t <= Date.now();
+};
+
+const sumOf = (rows, keys) => rows.reduce((t, r) => t + keys.reduce((x, k) => x + (Number(r[k]) || 0), 0), 0);
+
+// GET that treats "404 no data" as an empty list.
+const getList = async (url, params, token) => {
+    const res = await axios.get(url, {
+        params,
+        headers: { Authorization: `Bearer ${token}` },
+        validateStatus: (s) => (s >= 200 && s < 300) || s === 404,
+    });
+    return res.status === 404 ? [] : res.data;
+};
+
+const saveBlob = (data, filename, type) => {
+    const url = window.URL.createObjectURL(new Blob([data], { type }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+};
+
+const filenameFrom = (headers, fallback) => {
+    const disposition = headers?.['content-disposition'] || '';
+    const match = disposition.match(/filename\*?=([^;]+)/);
+    return match ? match[1].replace(/UTF-8''/, '').replace(/"/g, '').trim() : fallback;
+};
+
+const Segmented = ({ label, options, value, onChange, disabled }) => (
+    <div className="flex flex-col gap-1.5 min-w-0">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">{label}</span>
+        <div role="group" aria-label={label} className="flex flex-wrap gap-0.5 rounded-lg border border-gray-600 bg-gray-700 p-[3px]">
+            {options.map((opt) => (
+                <button
+                    key={opt}
+                    type="button"
+                    disabled={disabled}
+                    aria-pressed={value === opt}
+                    onClick={() => onChange(opt)}
+                    className={`flex-1 whitespace-nowrap rounded-md px-2 py-1.5 text-sm transition-colors ${value === opt ? 'bg-blue-600 font-semibold text-white' : 'text-gray-300 hover:bg-gray-600'}`}
+                >
+                    {opt}
+                </button>
+            ))}
+        </div>
+    </div>
+);
+
+const Spinner = () => <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" aria-hidden="true" />;
+
+const Stat = ({ label, value, note, tone }) => {
+    const tones = { demand: 'text-emerald-400', over: 'text-red-400', muted: 'text-gray-400', base: 'text-gray-100' };
+    return (
+        <div className="flex min-w-0 flex-col gap-1 rounded-lg border border-gray-700 bg-gray-800 px-4 py-3">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">{label}</span>
+            <b className={`text-2xl font-semibold tabular-nums ${tones[tone] || tones.base}`}>{fmt(value)}</b>
+            <small className="text-xs text-gray-400">{note}</small>
+        </div>
+    );
+};
+
+const Step = ({ n, title, state, children }) => {
+    const dot = state === 'done'
+        ? 'bg-emerald-400 text-emerald-950 border-emerald-400'
+        : state === 'now' ? 'bg-blue-600 text-white border-blue-600' : 'bg-gray-700 text-gray-400 border-gray-600';
+    return (
+        <div className="grid grid-cols-[28px_minmax(0,1fr)] gap-2.5 pt-3">
+            <span className={`grid h-[26px] w-[26px] place-items-center rounded-full border text-xs font-bold ${dot}`}>{state === 'done' ? '✓' : n}</span>
+            <div className="min-w-0">
+                <h3 className="mb-0.5 mt-[3px] text-sm font-semibold text-gray-100">{title}</h3>
+                {children}
+            </div>
+        </div>
+    );
+};
 
 const Hisab = () => {
     const userData = useSelector((state) => state.user);
     const token = userData?.token || localStorage.getItem('token');
-    
-    // State variables for overlimit preview
-    const [drawDate, setDrawDate] = useState(new Date().toISOString().split('T')[0]);
-    const [drawTime, setDrawTime] = useState("11 AM");
+
     const { draws } = useDrawsAutoSync({
         tokenCandidates: [token, localStorage.getItem('token'), localStorage.getItem('adminToken')],
         filterFn: isDrawVisibleForHistory,
-        pollMs: 5000,
+        pollMs: 30000,
     });
+
     const [selectedDraw, setSelectedDraw] = useState(null);
     const [parties, setParties] = useState([]);
     const [selectedParty, setSelectedParty] = useState(null);
-    const [archiveInfo, setArchiveInfo] = useState(null);
-    const [invoiceDoc, setInvoiceDoc] = useState(null);
-    const [invoiceLoading, setInvoiceLoading] = useState(false);
-    const [firstPrizeLimit, setFirstPrizeLimit] = useState(0);
-    const [secondPrizeLimit, setSecondPrizeLimit] = useState(0);
-    const [prizeType, setPrizeType] = useState("Hinsa");
-    const [previewData, setPreviewData] = useState({
-        demand: [],
-        overlimit: [],
-        originalEntries: []
-    });
-    const [overlimitSnapshots, setOverlimitSnapshots] = useState([]);
-    const [selectedOverlimitSnapshotId, setSelectedOverlimitSnapshotId] = useState('latest');
-    const [isLoading, setIsLoading] = useState(false); 
-    const [showPreview, setShowPreview] = useState(false);
-    const [emailLoading, setEmailLoading] = useState(false);
-    const [emailStatus, setEmailStatus] = useState('');
-    const [saveDemandLoading, setSaveDemandLoading] = useState(false);
-    const [dbfMode, setDbfMode] = useState('Mohsin'); // DBF mode: 'Mohsin' (default) or 'RLC'
+    const [prizeType, setPrizeType] = useState('Akra');
+    const [dbfMode, setDbfMode] = useState('Mohsin');
+    const [limit1, setLimit1] = useState('');
+    const [limit2, setLimit2] = useState('');
+    const [limitError, setLimitError] = useState(false);
 
+    const [result, setResult] = useState(null); // { rows, l1, l2 }
+    const [stale, setStale] = useState(false);
+    const [demandSaved, setDemandSaved] = useState(false);
+    const [filter, setFilter] = useState('all');
+    const [analyzing, setAnalyzing] = useState(false);
+    const [archives, setArchives] = useState([]);
+    const [modal, setModal] = useState(null); // 'save' | 'email'
+    const [working, setWorking] = useState(false);
+    const analyzeSeq = useRef(0);
+
+    // Keep the selected draw object in sync with the polled draw list.
     useEffect(() => {
         if (!selectedDraw?._id) return;
         const latest = draws.find((d) => String(d._id) === String(selectedDraw._id));
         if (!latest) {
             setSelectedDraw(null);
-            toast('Selected draw changed. Please reselect draw.');
+            toast('Selected draw is no longer available. Please pick a draw.');
             return;
         }
-        if (latest !== selectedDraw) {
-            setSelectedDraw(latest);
-        }
+        if (latest !== selectedDraw) setSelectedDraw(latest);
     }, [draws, selectedDraw]);
 
-    // Helper: normalize UID keys (string and numeric form)
-    const normalizeUid = (uid) => {
-        const s = String(uid ?? '').trim();
-        const digits = String(s).replace(/[^0-9]/g, '');
-        const numStr = digits === '' ? s : String(Number(digits));
-        return { s, numStr };
-    };
-
-    // Helper: aggregate entries by normalized numeric key to avoid duplicates like '0001' and '1'
-    const aggregateByNormalized = (entries = []) => {
-        const map = new Map();
-        for (const e of entries) {
-            const uid = e.uniqueId ?? e.no ?? '';
-            const { s } = normalizeUid(uid);
-            const key = s;
-            const existing = map.get(key);
-            if (existing) {
-                existing.firstPrice = (Number(existing.firstPrice) || 0) + (Number(e.firstPrice) || 0);
-                existing.secondPrice = (Number(existing.secondPrice) || 0) + (Number(e.secondPrice) || 0);
-                // prefer display with leading zeros if E's uid has it
-                if ((existing.uniqueId || '').length < (s || '').length) existing.uniqueId = s;
-                // preserve locked/archived flags if any
-                existing.archived = existing.archived || !!e.archived;
-                existing.locked = existing.locked || !!e.locked;
-                existing.archiveId = existing.archiveId || e.archiveId || null;
-            } else {
-                map.set(key, { uniqueId: s, firstPrice: Number(e.firstPrice) || 0, secondPrice: Number(e.secondPrice) || 0, archived: !!e.archived, locked: !!e.locked, archiveId: e.archiveId || null });
-            }
-        }
-        return Array.from(map.values());
-    };
-
-    // Fetch parties for distributor (party accounts)
     useEffect(() => {
-        const fetchParties = async () => {
+        (async () => {
             try {
-                const res = await axios.get('/api/v1/users/distributor-parties', {
-                    headers: { Authorization: `Bearer ${token}` }
-                });
-                setParties(res.data || res.data.parties || res.data.users || []);
+                const res = await axios.get('/api/v1/users/distributor-parties', { headers: { Authorization: `Bearer ${token}` } });
+                const list = Array.isArray(res.data) ? res.data : (res.data?.parties || res.data?.users || []);
+                setParties(list);
+                if (list.length === 1) setSelectedParty(list[0]);
             } catch (err) {
                 console.error('Failed to fetch parties', err);
                 setParties([]);
             }
-        };
-        fetchParties();
+        })();
     }, [token]);
 
-    // Check if an archive already exists for the selected draw/party/prizeType
-    useEffect(() => {
-        const checkArchive = async () => {
-            if (!selectedDraw || !selectedParty) {
-                setArchiveInfo(null);
-                return;
-            }
-            try {
-                const res = await axios.get('/api/v1/archives', {
-                    params: { drawId: selectedDraw._id, partyId: selectedParty._id, prizeType },
-                    headers: { Authorization: `Bearer ${token}` }
-                });
-                const list = res.data.archives || [];
-                setArchiveInfo(list.length ? list[0] : null);
-            } catch (err) {
-                console.error('Failed to check archives', err);
-                setArchiveInfo(null);
-            }
-        };
-        checkArchive();
-    }, [selectedDraw, selectedParty, prizeType, token]);
-
-    // Auto-fetch invoice when an archive exists (so user doesn't need to click "Fetch Invoice")
-    useEffect(() => {
-        if (!archiveInfo || !archiveInfo._id) return;
-        // If invoice already loaded or currently loading, skip
-        if (invoiceDoc || invoiceLoading) return;
-        // fetch invoice for the archive id
-        fetchInvoiceByArchive(archiveInfo._id).catch(err => {
-            console.debug('Auto-fetch invoice failed', err);
-        });
-    }, [archiveInfo]);
-
-    // Auto-run preview when selections change (draw/party/prize/limits) so preview shows immediately
-    useEffect(() => {
-        // only run when we have a selected draw and party and not archived
-        if (!selectedDraw || !selectedParty) return;
-        // Allow auto-run even when an overlimit archive exists; only overlimit rows are archived
-
-        // debounce to avoid multiple rapid calls when user changes selections
-        const timer = setTimeout(() => {
-            generatePreview().catch(err => {
-                // swallow errors from auto-run; user can click Analyze to retry
-                console.debug('Auto-generatePreview failed', err);
-            });
-        }, 280);
-
-        return () => clearTimeout(timer);
-    }, [selectedDraw, selectedParty, prizeType, firstPrizeLimit, secondPrizeLimit, archiveInfo]);
-
-    // Fetch combined voucher data (similar to Center component)
-    const fetchCombinedVoucherData = async (selectedDate, selectedTimeSlot, category = "general", drawId = null) => {
+    const loadArchives = useCallback(async () => {
+        if (!selectedDraw?._id || !selectedParty?._id) { setArchives([]); return; }
         try {
-            const params = { category };
-            if (drawId) params.drawId = drawId;
-            else {
-                params.date = selectedDate;
-                params.timeSlot = selectedTimeSlot;
-            }
-
-            const response = await axios.get("/api/v1/data/get-combined-voucher-data", {
-                params,
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                },
-            });
-            return response.data.data;
-        } catch (error) {
-            console.error("Error fetching combined voucher data:", error);
-            toast.error("Failed to fetch combined voucher data");
-            return [];
+            const params = { drawId: selectedDraw._id, partyId: selectedParty._id };
+            if (prizeType !== 'All') params.prizeType = prizeType;
+            const data = await getList('/api/v1/archives', params, token);
+            setArchives(Array.isArray(data?.archives) ? data.archives : []);
+        } catch (err) {
+            console.error('Failed to load emails', err);
+            setArchives([]);
         }
-    };
+    }, [selectedDraw?._id, selectedParty?._id, prizeType, token]);
 
-    // Filter entries by prize type (same logic as Center component)
-    const filterEntriesByPrizeType = (entries, PrizeEntry) => {
-        if (PrizeEntry === "All") return entries;
-        return entries.filter(entry => {
-            const number = entry.no || entry.number;
-            if (PrizeEntry === "Hinsa") {
-                return (
-                    /^\d{1}$/.test(number) ||
-                    (number.includes('+') && number.length === 2) ||
-                    (number.split('+').length - 1 === 2 && number.length === 3) ||
-                    (number.split('+').length - 1 === 3 && number.length === 4)
-                );
-            }
-            if (PrizeEntry === "Akra") {
-                return (
-                    /^\d{2}$/.test(number) ||
-                    (number.includes('+') && number.length === 3) ||
-                    (number.split('+').length - 1 === 2 && number.length === 4)
-                );
-            }
-            if (PrizeEntry === "Tandola") {
-                return (
-                    /^\d{3}$/.test(number) ||
-                    (number.length === 4 && number.includes('+'))
-                );
-            }
-            if (PrizeEntry === "Pangora") {
-                return /^\d{4}$/.test(number);
-            }
-            return false;
-        });
-    };
+    useEffect(() => { loadArchives(); }, [loadArchives]);
 
-    // Split entries by limit (same logic as Center component),
-    // with special handling when only one side's limit is 0.
-    const splitEntriesByLimit = (entries, firstLimit, secondLimit) => {
-        const demand = [];
-        const overlimit = [];
+    // A different draw, party or prize type means a different analysis.
+    useEffect(() => {
+        analyzeSeq.current += 1;
+        setResult(null);
+        setStale(false);
+        setDemandSaved(false);
+        setFilter('all');
+    }, [selectedDraw?._id, selectedParty?._id, prizeType]);
 
-        const isFirstZero = Number(firstLimit) === 0;
-        const isSecondZero = Number(secondLimit) === 0;
+    const drawClosed = isDrawClosed(selectedDraw);
 
-        entries.forEach(entry => {
-            const fVal = Number(entry.f || 0) || 0;
-            const sVal = Number(entry.s || 0) || 0;
-
-            let demandFirst = 0;
-            let demandSecond = 0;
-            let overFirst = 0;
-            let overSecond = 0;
-
-            if (!isFirstZero && isSecondZero) {
-                // First has limit, second is 0 -> demand only in first, second demand 0, second overlimit overall
-                demandFirst = firstLimit > 0 ? Math.min(fVal, firstLimit) : fVal;
-                demandSecond = 0;
-                overFirst = Math.max(0, fVal - demandFirst);
-                overSecond = sVal;
-            } else if (isFirstZero && !isSecondZero) {
-                // Second has limit, first is 0 -> demand only in second, first demand 0, first overlimit overall
-                demandFirst = 0;
-                demandSecond = secondLimit > 0 ? Math.min(sVal, secondLimit) : sVal;
-                overFirst = fVal;
-                overSecond = Math.max(0, sVal - demandSecond);
-            } else {
-                // Both limits 0 or both > 0 -> original behavior
-                demandFirst = firstLimit > 0 ? Math.min(fVal, firstLimit) : fVal;
-                demandSecond = secondLimit > 0 ? Math.min(sVal, secondLimit) : sVal;
-                overFirst = Math.max(0, fVal - demandFirst);
-                overSecond = Math.max(0, sVal - demandSecond);
-            }
-
-            if (demandFirst > 0 || demandSecond > 0) {
-                demand.push({
-                    uniqueId: entry.no,
-                    firstPrice: demandFirst,
-                    secondPrice: demandSecond
-                });
-            }
-            if (overFirst > 0 || overSecond > 0) {
-                overlimit.push({
-                    uniqueId: entry.no,
-                    firstPrice: overFirst,
-                    secondPrice: overSecond
-                });
-            }
-        });
-
-        return { demand, overlimit };
-    };
-
-    // Generate preview data
-    const generatePreview = async () => {
-        setIsLoading(true);
+    const runAnalyze = async () => {
+        if (!selectedDraw) return toast.error('Pick a draw first.');
+        if (!selectedParty) return toast.error('Pick a party first.');
+        if (String(limit1).trim() === '' || String(limit2).trim() === '') {
+            setLimitError(true);
+            return;
+        }
+        setLimitError(false);
+        const l1 = Math.max(0, Number(limit1) || 0);
+        const l2 = Math.max(0, Number(limit2) || 0);
+        const seq = ++analyzeSeq.current;
+        setAnalyzing(true);
         try {
-            const fetchedEntries = await fetchCombinedVoucherData(drawDate, drawTime, "general", selectedDraw?._id || null);
-            if (fetchedEntries.length === 0) {
-                toast("No combined records found..");
-                setIsLoading(false);
-                return;
+            const overParams = { drawId: selectedDraw._id, userId: selectedParty._id, category: 'overlimit' };
+            if (prizeType !== 'All') overParams.prizeType = prizeType;
+            const [combined, overRes] = await Promise.all([
+                getList('/api/v1/data/get-combined-voucher-data', { category: 'general', drawId: selectedDraw._id }, token),
+                getList('/api/v1/data/get-client-data', overParams, token),
+                loadArchives(),
+            ]);
+            if (seq !== analyzeSeq.current) return;
+
+            // Combined sale per number.
+            const sale = new Map();
+            for (const doc of combined?.data || []) {
+                for (const item of doc.data || []) {
+                    const key = uidKey(item.uniqueId);
+                    if (!key || !matchesPrizeType(key, prizeType)) continue;
+                    const prev = sale.get(key) || { f: 0, s: 0 };
+                    prev.f += Number(item.firstPrice) || 0;
+                    prev.s += Number(item.secondPrice) || 0;
+                    sale.set(key, prev);
+                }
             }
 
-            let processedEntries = [];
-            if (Array.isArray(fetchedEntries) && fetchedEntries.length > 0) {
-                let allVoucherRows = [];
-                if (selectedDraw && selectedDraw._id) {
-                    // When draw selected, backend should return records related to that drawId
-                    allVoucherRows = fetchedEntries.flatMap(entry =>
-                        entry.data.map(item => ({
-                            objectId: item._id,
-                            no: item.uniqueId,
-                            f: item.firstPrice,
-                            s: item.secondPrice,
-                        }))
-                    );
-                } else {
-                    allVoucherRows = fetchedEntries
-                        .filter(entry => entry.timeSlot === drawTime)
-                        .flatMap(entry =>
-                            entry.data.map(item => ({
-                                objectId: item._id,
-                                no: item.uniqueId,
-                                f: item.firstPrice,
-                                s: item.secondPrice,
-                            }))
-                        );
+            // Everything already emailed (archived rows) per number.
+            const sent = new Map();
+            for (const doc of overRes?.data || []) {
+                for (const item of doc.data || []) {
+                    if (!item?.archived) continue;
+                    const key = uidKey(item.uniqueId);
+                    if (!matchesPrizeType(key, prizeType)) continue;
+                    const prev = sent.get(key) || { f: 0, s: 0 };
+                    prev.f += Number(item.firstPrice) || 0;
+                    prev.s += Number(item.secondPrice) || 0;
+                    sent.set(key, prev);
                 }
+            }
 
-                const combinedEntries = {};
-                allVoucherRows.forEach(({ no, f, s }) => {
-                    const { s: sKey } = normalizeUid(no);
-                    const key = sKey;
-                    if (combinedEntries[key]) {
-                        combinedEntries[key].f += f;
-                        combinedEntries[key].s += s;
-                        combinedEntries[key].count += 1;
-                        // prefer a display `no` with leading zeros if one appears
-                        if ((combinedEntries[key].no || '').length < (sKey || '').length) combinedEntries[key].no = sKey;
-                    } else {
-                        combinedEntries[key] = {
-                            no: sKey,
-                            f,
-                            s,
-                            count: 1
-                        };
-                    }
+            const rows = [];
+            for (const [no, { f, s }] of sale.entries()) {
+                const df = Math.min(f, l1);
+                const ds = Math.min(s, l2);
+                const sentRow = sent.get(no) || { f: 0, s: 0 };
+                rows.push({
+                    no, f, s, df, ds,
+                    of: Math.max(0, f - df - sentRow.f),
+                    os: Math.max(0, s - ds - sentRow.s),
+                    sf: Math.min(sentRow.f, Math.max(0, f - df)),
+                    ss: Math.min(sentRow.s, Math.max(0, s - ds)),
                 });
-
-                processedEntries = Object.values(combinedEntries);
             }
+            rows.sort((a, b) => (b.of + b.os) - (a.of + a.os) || (b.f + b.s) - (a.f + a.s) || a.no.localeCompare(b.no, undefined, { numeric: true }));
 
-            const filteredEntries = filterEntriesByPrizeType(processedEntries, prizeType);
-
-            // Special case: when both limits are 0, demand should be 0/0
-            // for every entry but Overlimit Entries must show only NEW
-            // overlimit amounts (excluding any archived overlimit rows).
-            if (Number(firstPrizeLimit) === 0 && Number(secondPrizeLimit) === 0) {
-                const zeroDemand = [];
-                const fullOverlimitRaw = [];
-
-                for (const entry of filteredEntries) {
-                    const uid = entry.no || entry.uniqueId;
-                    const f = Number(entry.f ?? entry.firstPrice ?? 0) || 0;
-                    const s = Number(entry.s ?? entry.secondPrice ?? 0) || 0;
-                    if (f > 0 || s > 0) {
-                        zeroDemand.push({ uniqueId: uid, firstPrice: 0, secondPrice: 0 });
-                        fullOverlimitRaw.push({ uniqueId: uid, firstPrice: f, secondPrice: s });
-                    }
-                }
-
-                // Build archivedTotalsMap from existing overlimit docs so we
-                // can subtract already-archived amounts and only display
-                // new overlimit entries in the UI.
-                let archivedTotalsMap = new Map();
-                if (selectedParty && selectedDraw && selectedParty._id) {
-                    try {
-                        const overRes = await axios.get('/api/v1/data/get-client-data', {
-                            params: { drawId: selectedDraw._id, userId: selectedParty._id, category: 'overlimit', prizeType },
-                            headers: { Authorization: `Bearer ${token}` }
-                        });
-                        const overDocs = overRes.data.data || [];
-                        archivedTotalsMap = new Map();
-                        for (const doc of overDocs) {
-                            if (!doc || !Array.isArray(doc.data)) continue;
-                            for (const item of doc.data) {
-                                if (!item || !item.archived) continue; // only archived rows contribute
-                                const { s } = normalizeUid(item.uniqueId || item.no || item.number);
-                                const f = Number(item.firstPrice || item.fPrize || 0) || 0;
-                                const sec = Number(item.secondPrice || item.sPrize || 0) || 0;
-                                const prev = archivedTotalsMap.get(s) || { first: 0, second: 0 };
-                                prev.first += f; prev.second += sec;
-                                archivedTotalsMap.set(s, prev);
-                            }
-                        }
-                    } catch (e) {
-                        console.warn('Failed to fetch server overlimit snapshot for 0/0 branch', e);
-                        archivedTotalsMap = new Map();
-                    }
-                }
-
-                const cleanedOverlimit = [];
-                for (const ol of fullOverlimitRaw) {
-                    const { s } = normalizeUid(ol.uniqueId);
-                    const archived = archivedTotalsMap.get(s) || { first: 0, second: 0 };
-                    const f = Math.max(0, (Number(ol.firstPrice) || 0) - (archived.first || 0));
-                    const sec = Math.max(0, (Number(ol.secondPrice) || 0) - (archived.second || 0));
-                    if (f > 0 || sec > 0) cleanedOverlimit.push({ uniqueId: ol.uniqueId, firstPrice: f, secondPrice: sec });
-                }
-
-                const normDemand = aggregateByNormalized(zeroDemand || []);
-                const normOver = aggregateByNormalized(cleanedOverlimit || []);
-
-                setPreviewData({
-                    demand: normDemand,
-                    // demandToSave mirrors what we show; backend will
-                    // aggregate zeros and create/update the demand doc
-                    // with 0/0 entries.
-                    demandToSave: normDemand,
-                    overlimit: normOver,
-                    originalEntries: filteredEntries,
-                });
-                setShowPreview(true);
-                toast.success("Preview generated successfully!");
-                return;
-            }
-
-            // default values
-            let demand = [];
-            let overlimit = [];
-            let demandToSave = [];
-
-            const isFirstZero = Number(firstPrizeLimit) === 0;
-            const isSecondZero = Number(secondPrizeLimit) === 0;
-
-            // If a party+draw selected, fetch saved demand & overlimit and compute displayed values
-            if (selectedParty && selectedDraw && selectedParty._id) {
-                try {
-                    const res = await axios.get('/api/v1/data/get-client-data', {
-                        params: { drawId: selectedDraw._id, userId: selectedParty._id, category: 'demand', prizeType },
-                        headers: { Authorization: `Bearer ${token}` }
-                    });
-                    const demandDocs = res.data.data || [];
-
-                    // build cumulative saved-demand map
-                    const cumulativeMap = new Map();
-                    for (const doc of demandDocs) {
-                        if (!doc || !Array.isArray(doc.data)) continue;
-                        for (const item of doc.data) {
-                                    const { s } = normalizeUid(item.uniqueId);
-                            const f = Number(item.firstPrice || 0) || 0;
-                            const sec = Number(item.secondPrice || 0) || 0;
-                            const prev = cumulativeMap.get(s) || { first: 0, second: 0 };
-                            prev.first += f; prev.second += sec;
-                            cumulativeMap.set(s, prev);
-                        }
-                    }
-
-                    // attempt to fetch server overlimit snapshot(s). We'll:
-                    // 1) compute `archivedTotalsMap` by summing archived rows across all overlimit docs
-                    // 2) pick the newest overlimit document and build `serverOverlimitMap` for merging
-                    let serverOverlimitMap = null;
-                    let archivedTotalsMap = null;
-                    try {
-                        const overRes = await axios.get('/api/v1/data/get-client-data', {
-                            params: { drawId: selectedDraw._id, userId: selectedParty._id, category: 'overlimit', prizeType },
-                            headers: { Authorization: `Bearer ${token}` }
-                        });
-                        const overDocs = overRes.data.data || [];
-
-                        // store available snapshots for UI selector
-                        setOverlimitSnapshots(overDocs || []);
-
-                        // Build archivedTotalsMap by summing archived rows across ALL overlimit docs
-                        archivedTotalsMap = new Map();
-                        for (const doc of overDocs) {
-                            if (!doc || !Array.isArray(doc.data)) continue;
-                            for (const item of doc.data) {
-                                if (!item) continue;
-                                if (!item.archived) continue; // only archived rows contribute
-                                const { s } = normalizeUid(item.uniqueId || item.no || item.number);
-                                const f = Number(item.firstPrice || item.fPrize || 0) || 0;
-                                const sec = Number(item.secondPrice || item.sPrize || 0) || 0;
-                                const prev = archivedTotalsMap.get(s) || { first: 0, second: 0 };
-                                prev.first += f; prev.second += sec;
-                                archivedTotalsMap.set(s, prev);
-                            }
-                        }
-
-                        if (overDocs.length > 0) {
-                            // pick the snapshot according to user's selection, otherwise newest
-                            let latest = null;
-                            if (selectedOverlimitSnapshotId && selectedOverlimitSnapshotId !== 'latest') {
-                                latest = overDocs.find(d => String(d._id) === String(selectedOverlimitSnapshotId)) || null;
-                            }
-                            if (!latest) latest = overDocs.sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt))[0];
-
-                            serverOverlimitMap = new Map();
-                            if (latest && Array.isArray(latest.data)) {
-                                for (const item of latest.data) {
-                                    if (!item) continue;
-                                    const { s } = normalizeUid(item.uniqueId || item.no || item.number);
-                                    const f = Number(item.firstPrice || item.fPrize || 0) || 0;
-                                    const sec = Number(item.secondPrice || item.sPrize || 0) || 0;
-                                    const prev = serverOverlimitMap.get(s) || { firstPrice: 0, secondPrice: 0, archived: false, locked: false, archiveId: null };
-                                    prev.firstPrice += f; prev.secondPrice += sec;
-                                    prev.archived = prev.archived || !!item.archived;
-                                    prev.locked = prev.locked || !!item.locked;
-                                    prev.archiveId = prev.archiveId || item.archiveId || null;
-                                    serverOverlimitMap.set(s, prev);
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        serverOverlimitMap = null;
-                        archivedTotalsMap = null;
-                        console.warn('Failed to fetch server overlimit snapshot', e);
-                    }
-
-                    // compute UI demand (saved + delta) and overlimit using current limits
-                    // debugInfo removed
-                    for (const entry of filteredEntries) {
-                        const uid = entry.no;
-                        const { s: key } = normalizeUid(uid);
-                        const combinedF = Number(entry.f) || 0;
-                        const combinedS = Number(entry.s) || 0;
-                        const saved = cumulativeMap.get(key) || { first: 0, second: 0 };
-                        // track analyzed values for debugging/logging
-                        let analyzedF = combinedF;
-                        let analyzedS = combinedS;
-
-                        // If both limits are zero, prefer showing already-saved cumulative demand in the UI
-                        // (do not compute analyzed from limits which would be 0)
-                        let deltaF = 0;
-                        let deltaS = 0;
-                        let uiF = 0;
-                        let uiS = 0;
-                        if (isFirstZero && isSecondZero) {
-                            // show saved cumulative demand as the displayed demand
-                            uiF = Number(saved.first) || 0;
-                            uiS = Number(saved.second) || 0;
-                            // no deltas to save when limits are zero
-                            deltaF = 0; deltaS = 0;
-                        } else {
-                            const localAnalyzedF = firstPrizeLimit > 0 ? Math.min(combinedF, firstPrizeLimit) : combinedF;
-                            const localAnalyzedS = secondPrizeLimit > 0 ? Math.min(combinedS, secondPrizeLimit) : combinedS;
-
-                            if (!isFirstZero && isSecondZero) {
-                                // First column has limit, second is 0 (overall in overlimit)
-                                analyzedF = localAnalyzedF;
-                                analyzedS = combinedS; // second side uses full combined for debug
-                                deltaF = Math.max(0, localAnalyzedF - (Number(saved.first) || 0));
-                                deltaS = 0;
-                                uiF = localAnalyzedF;
-                                uiS = 0;
-                            } else if (isFirstZero && !isSecondZero) {
-                                // Second column has limit, first is 0 (overall in overlimit)
-                                analyzedF = combinedF; // first side uses full combined for debug
-                                analyzedS = localAnalyzedS;
-                                deltaF = 0;
-                                deltaS = Math.max(0, localAnalyzedS - (Number(saved.second) || 0));
-                                uiF = 0;
-                                uiS = localAnalyzedS;
-                            } else {
-                                // Both limits > 0 -> original behavior
-                                analyzedF = localAnalyzedF;
-                                analyzedS = localAnalyzedS;
-                                deltaF = Math.max(0, localAnalyzedF - (Number(saved.first) || 0));
-                                deltaS = Math.max(0, localAnalyzedS - (Number(saved.second) || 0));
-
-                                // For display, show the current analyzed (capped) amounts so
-                                // changing limits immediately reflects across all entries.
-                                // We still only persist positive deltas (no decreases on save).
-                                uiF = localAnalyzedF;
-                                uiS = localAnalyzedS;
-                            }
-                        }
-
-                        if (uiF > 0 || uiS > 0) demand.push({ uniqueId: uid, firstPrice: uiF, secondPrice: uiS });
-                        if (deltaF > 0 || deltaS > 0) demandToSave.push({ uniqueId: uid, firstPrice: deltaF, secondPrice: deltaS });
-
-                        // compute local overlimit only when user provided limits
-                        if (!(isFirstZero && isSecondZero)) {
-                            const over_local_F = Math.max(0, combinedF - uiF);
-                            const over_local_S = Math.max(0, combinedS - uiS);
-                            if (over_local_F > 0 || over_local_S > 0) {
-                                overlimit.push({ uniqueId: uid, firstPrice: over_local_F, secondPrice: over_local_S });
-                            }
-                        }
-
-                        // analyzedKeys tracking removed
-
-                        console.debug('[generatePreview] uid', uid, { combinedF, combinedS, saved, analyzedF, analyzedS, deltaF, deltaS, uiF, uiS, serverOverlimit: serverOverlimitMap ? serverOverlimitMap.get(key) : null });
-                    }
-
-                    // Subtract archivedTotals (if any) from the locally computed overlimit so archived amounts are not re-shown
-                    if (archivedTotalsMap && archivedTotalsMap.size > 0 && Array.isArray(overlimit) && overlimit.length > 0) {
-                        const cleaned = [];
-                        for (const ol of overlimit) {
-                            const { s: key } = normalizeUid(ol.uniqueId);
-                            const archived = archivedTotalsMap.get(key) || { first: 0, second: 0 };
-                            const f = Math.max(0, (Number(ol.firstPrice) || 0) - (archived.first || 0));
-                            const sec = Math.max(0, (Number(ol.secondPrice) || 0) - (archived.second || 0));
-                            if (f > 0 || sec > 0) cleaned.push({ uniqueId: ol.uniqueId, firstPrice: f, secondPrice: sec });
-                        }
-                        overlimit = cleaned;
-                    }
-
-                    // If server overlimit snapshot exists, prefer using the server's snapshot rows only.
-                    // The backend now writes insert-only snapshots containing only newly computed entries,
-                    // so prefer the latest server snapshot for the Overlimit Entries panel. If none exists,
-                    // fall back to locally computed overlimit.
-                    if (serverOverlimitMap && serverOverlimitMap.size > 0) {
-                        // Determine whether the latest server snapshot is locked/archived (all rows archived+locked)
-                        const latestDocRows = [];
-                        for (const [k, v] of serverOverlimitMap.entries()) {
-                            latestDocRows.push({ uniqueId: k, firstPrice: v.firstPrice, secondPrice: v.secondPrice, archived: !!v.archived, locked: !!v.locked });
-                        }
-
-                        const allLocked = latestDocRows.length > 0 && latestDocRows.every(r => r.archived === true && r.locked === true);
-
-                        if (allLocked) {
-                            // snapshot is archived/locked -> do not show archived rows in Overlimit Entries
-                            // fall back to locally computed overlimit only
-                            // do nothing here (overlimit remains the local computed value)
-                        } else {
-                            // snapshot is active (not locked): merge server snapshot rows with locally computed overlimit
-                            const mergedMap = new Map();
-                            // Start with server snapshot rows (BUT skip archived/locked rows entirely)
-                            for (const r of latestDocRows) {
-                                if (r.archived === true || r.locked === true) continue;
-                                if (!filterEntriesByPrizeType([{ no: r.uniqueId }], prizeType).length) continue;
-                                const { s: kk } = normalizeUid(r.uniqueId);
-                                mergedMap.set(kk, { uniqueId: r.uniqueId, firstPrice: Number(r.firstPrice) || 0, secondPrice: Number(r.secondPrice) || 0 });
-                            }
-                            // Merge locally computed overlimit into mergedMap, BUT do NOT increase values
-                            // for UIDs that already exist in the server snapshot. This prevents double-counting
-                            // and keeps server-saved values authoritative for UIDs already saved.
-                            for (const ol of overlimit) {
-                                const { s: kk } = normalizeUid(ol.uniqueId);
-                                const existing = mergedMap.get(kk);
-                                if (existing) {
-                                    // skip adding to existing to avoid increasing already-saved amounts
-                                    continue;
-                                } else {
-                                    mergedMap.set(kk, { uniqueId: ol.uniqueId, firstPrice: Number(ol.firstPrice) || 0, secondPrice: Number(ol.secondPrice) || 0 });
-                                }
-                            }
-
-                            overlimit = Array.from(mergedMap.values());
-                        }
-                    }
-                } catch (err) {
-                    console.warn('Failed to fetch saved demand; falling back to local calculation', err);
-                    const split = splitEntriesByLimit(filteredEntries, firstPrizeLimit, secondPrizeLimit);
-                    demand = split.demand; overlimit = split.overlimit;
-                    demandToSave = split.demand;
-                }
-            } else {
-                const split = splitEntriesByLimit(filteredEntries, firstPrizeLimit, secondPrizeLimit);
-                demand = split.demand; overlimit = split.overlimit;
-                demandToSave = split.demand;
-            }
-
-            // aggregate overlimit rows by normalized UID to remove duplicates like '0001' and '1'
-            overlimit = aggregateByNormalized(overlimit || []);
-
-            setPreviewData({
-                demand,
-                demandToSave,
-                overlimit,
-                originalEntries: filteredEntries
-            });
-            setShowPreview(true);
-            toast.success("Preview generated successfully!");
-        } catch (error) {
-            console.error("Error generating preview:", error);
-            toast.error("Failed to generate preview");
+            // Real amount already emailed for these numbers (not trimmed to today's limits).
+            const sentTotal = Array.from(sent.values()).reduce((t, v) => t + v.f + v.s, 0);
+            setResult({ rows, l1, l2, sentTotal });
+            setStale(false);
+            setDemandSaved(false);
+            if (rows.length === 0) toast('No sale found for this draw and prize type.');
+        } catch (err) {
+            console.error('Analyze failed', err);
+            toast.error(err?.response?.data?.error || 'Could not analyze. Check the connection and try again.');
         } finally {
-            setIsLoading(false);
+            if (seq === analyzeSeq.current) setAnalyzing(false);
         }
     };
 
-    // Calculate totals for a dataset
-    const calculateTotals = (data) => {
-        return data.reduce((acc, item) => {
-            acc.first += item.firstPrice || 0;
-            acc.second += item.secondPrice || 0;
-            acc.total += (item.firstPrice || 0) + (item.secondPrice || 0);
-            return acc;
-        }, { first: 0, second: 0, total: 0 });
+    const onLimitChange = (setter) => (e) => {
+        setter(e.target.value);
+        setLimitError(false);
+        if (result) setStale(true);
     };
 
-    // Compute highest record by total (fPrize + sPrize). Returns { number, fPrize, sPrize }
-    const computeHighestFromRecords = (records = []) => {
-        if (!Array.isArray(records) || records.length === 0) return null;
-        let best = null;
-        for (const r of records) {
-            const f = Number(r.fPrize ?? r.firstPrice ?? 0);
-            const s = Number(r.sPrize ?? r.secondPrice ?? 0);
-            const total = f + s;
-            if (!best) {
-                best = { number: r.number ?? r.uniqueId, fPrize: f, sPrize: s, total };
-                continue;
-            }
-            const btotal = Number(best.fPrize || 0) + Number(best.sPrize || 0);
-            if (total > btotal) {
-                best = { number: r.number ?? r.uniqueId, fPrize: f, sPrize: s, total };
-            } else if (total === btotal) {
-                const rn = parseInt(String(r.number ?? r.uniqueId).replace(/[^0-9]/g, ''), 10);
-                const bn = parseInt(String(best.number).replace(/[^0-9]/g, ''), 10);
-                if (!isNaN(rn) && !isNaN(bn) && rn > bn) best = { number: r.number ?? r.uniqueId, fPrize: f, sPrize: s, total };
-            }
-        }
-        return best;
-    };
+    const rows = result?.rows || [];
+    const totals = useMemo(() => ({
+        sale: sumOf(rows, ['f', 's']),
+        demand: sumOf(rows, ['df', 'ds']),
+        over: sumOf(rows, ['of', 'os']),
+        sent: result?.sentTotal || 0,
+        sentInBar: sumOf(rows, ['sf', 'ss']),
+    }), [rows, result?.sentTotal]);
+    const overRows = rows.filter((r) => r.of + r.os > 0);
+    const visibleRows = filter === 'over' ? overRows : filter === 'within' ? rows.filter((r) => r.of + r.os === 0) : rows;
 
-    // Create archive (ZIP with DBF) for overlimit records
-    const createArchive = async () => {
-        if (!selectedParty) return toast.error('Select a party first');
-        if (!selectedDraw) return toast.error('Select a draw first');
-        if (!previewData.overlimit || previewData.overlimit.length === 0) return toast.error('No overlimit records to archive');
+    const ready = !!result && !stale && !analyzing;
+    const isAll = prizeType === 'All';
+    const canSave = ready && !isAll && !drawClosed && !demandSaved && rows.length > 0;
+    const canEmail = ready && !isAll && !drawClosed && demandSaved && overRows.length > 0;
+
+    let emailNote = '';
+    if (ready && !isAll && !drawClosed) {
+        if (!demandSaved) emailNote = 'Save demand first, so these numbers are not emailed twice.';
+        else if (overRows.length === 0) emailNote = 'No new overlimit. Nothing to email.';
+    }
+
+    const saveDemand = async () => {
+        setWorking(true);
         try {
+            const zeroLimits = result.l1 === 0 && result.l2 === 0;
             const payload = {
                 drawId: selectedDraw._id,
-                prizeType,
                 partyId: selectedParty._id,
-                records: previewData.overlimit.map(r => ({ uniqueId: r.uniqueId, firstPrice: r.firstPrice, secondPrice: r.secondPrice })),
-                mode: dbfMode
+                prizeType,
+                replace: true,
+                forceProtected: false,
+                records: rows
+                    .filter((r) => zeroLimits || r.df > 0 || r.ds > 0)
+                    .map((r) => ({ uniqueId: r.no, firstPrice: r.df, secondPrice: r.ds })),
+                overlimit: overRows.map((r) => ({ uniqueId: r.no, firstPrice: r.of, secondPrice: r.os })),
+                combined: rows.map((r) => ({ uniqueId: r.no, firstPrice: r.f, secondPrice: r.s })),
             };
-            const res = await axios.post('/api/v1/archives', payload, { headers: { Authorization: `Bearer ${token}` } });
-            setArchiveInfo(res.data.archive);
-            // if backend returned invoice, set it; otherwise attempt to fetch by archive id
-            if (res.data.invoice) {
-                setInvoiceDoc(res.data.invoice);
-            } else if (res.data.archive && res.data.archive._id) {
-                fetchInvoiceByArchive(res.data.archive._id).catch(() => {});
-            }
-            toast.success('Archive created');
+            await axios.post('/api/v1/data/save-demand', payload, { headers: { Authorization: `Bearer ${token}` } });
+            setDemandSaved(true);
+            setModal(null);
+            toast.success(`Demand saved for ${selectedParty.username} · ${prizeType}`);
         } catch (err) {
-            console.error('createArchive error', err);
-            toast.error(err?.response?.data?.error || 'Failed to create archive');
+            console.error('Save demand failed', err);
+            toast.error(err?.response?.data?.error || 'Could not save demand. Try again.');
+        } finally {
+            setWorking(false);
         }
     };
 
-    const deleteArchive = async () => {
-        if (!archiveInfo) return;
-        if (!confirm('Delete archive and unlock records?')) return;
+    const downloadZip = async (archive) => {
         try {
-            await axios.delete(`/api/v1/archives/${archiveInfo._id}`, { headers: { Authorization: `Bearer ${token}` } });
-            setArchiveInfo(null);
-            toast.success('Archive deleted');
-        } catch (err) {
-            console.error('deleteArchive error', err);
-            toast.error(err?.response?.data?.error || 'Failed to delete archive');
-        }
-    };
-
-    // Download archive using axios to include Authorization header
-    const downloadArchive = async (id = null) => {
-        const archiveId = id || archiveInfo?._id;
-        if (!archiveId) return toast.error('No archive selected');
-        if (!token) return toast.error('No token provided. Please sign in to download.');
-        try {
-            const res = await axios.get(`/api/v1/archives/${archiveId}/download`, {
+            const res = await axios.get(`/api/v1/archives/${archive._id}/download`, {
                 headers: { Authorization: `Bearer ${token}` },
                 responseType: 'blob',
             });
-
-            const blob = new Blob([res.data], { type: res.headers['content-type'] || 'application/zip' });
-            // try to determine filename from disposition header, otherwise fallback to archiveInfo
-            let filename = `${archiveId}.zip`;
-            const disposition = res.headers['content-disposition'] || res.headers['Content-Disposition'];
-            if (disposition) {
-                const match = disposition.match(/filename\*?=([^;]+)/);
-                if (match) {
-                    filename = match[1].replace(/UTF-8''/, '').replace(/"/g, '').trim();
-                }
-            } else if (archiveInfo && (archiveInfo.fileName || archiveInfo.file)) {
-                filename = archiveInfo.fileName || archiveInfo.file;
-            }
-
-            const url = window.URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.setAttribute('download', filename);
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
-            window.URL.revokeObjectURL(url);
-            toast.success('Download started');
+            saveBlob(res.data, filenameFrom(res.headers, archive.fileName || `${archive._id}.zip`), 'application/zip');
         } catch (err) {
-            console.error('downloadArchive error', err);
-            const message = err?.response?.data?.error || err?.response?.data || err.message || 'Failed to download archive';
+            let message = 'Could not download the ZIP.';
+            try { message = JSON.parse(await err?.response?.data?.text())?.error || message; } catch { /* not JSON */ }
             toast.error(message);
         }
     };
 
-    // Fetch invoice associated with an archiveId
-    const fetchInvoiceByArchive = async (archiveId) => {
-        if (!archiveId) return;
-        setInvoiceLoading(true);
+    const downloadInvoice = async (invoiceId, invoiceNo) => {
+        if (!invoiceId) return toast.error('No invoice for this email.');
         try {
-            const res = await axios.get('/api/v1/invoices', {
-                params: { archiveId },
-                headers: { Authorization: `Bearer ${token}` }
+            const res = await axios.get(`/api/v1/invoices/${invoiceId}/download`, {
+                headers: { Authorization: `Bearer ${token}` },
+                responseType: 'blob',
             });
-            // backend may return { invoices: [...] } or { invoice: {...} }
-            let inv = null;
-            if (res.data) {
-                if (Array.isArray(res.data.invoices)) inv = res.data.invoices[0] || null;
-                else if (res.data.invoice) inv = res.data.invoice;
-                else if (res.data._id) inv = res.data;
-            }
-            setInvoiceDoc(inv);
-            if (!inv) toast('No invoice found for this archive');
+            saveBlob(res.data, filenameFrom(res.headers, `invoice_${invoiceNo || invoiceId}.pdf`), 'application/pdf');
         } catch (err) {
-            console.error('fetchInvoiceByArchive error', err);
-            toast.error('Failed to fetch invoice');
+            console.error('Invoice download failed', err);
+            toast.error('Could not download the invoice PDF.');
+        }
+    };
+
+    const createEmail = async () => {
+        setWorking(true);
+        try {
+            const payload = {
+                drawId: selectedDraw._id,
+                partyId: selectedParty._id,
+                prizeType,
+                mode: dbfMode,
+                records: overRows.map((r) => ({ uniqueId: r.no, firstPrice: r.of, secondPrice: r.os })),
+            };
+            const res = await axios.post('/api/v1/archives', payload, { headers: { Authorization: `Bearer ${token}` } });
+            setModal(null);
+            const archive = res.data?.archive;
+            const invoiceNo = res.data?.invoice?.invoiceNo;
+            toast.success(`Email created${invoiceNo ? ` · Invoice #${invoiceNo}` : ''}`);
+            if (archive?._id) await downloadZip(archive);
+            await runAnalyze();
+            setDemandSaved(true);
+        } catch (err) {
+            console.error('Create email failed', err);
+            toast.error(err?.response?.data?.error || 'Could not create the email. Try again.');
         } finally {
-            setInvoiceLoading(false);
+            setWorking(false);
         }
     };
 
-    const downloadInvoicePdf = async (invoiceId = null) => {
-        const id = invoiceId || invoiceDoc?._id;
-        if (!id) return toast.error('No invoice selected');
-        if (!token) return toast.error('No token provided. Please sign in to download.');
-        try {
-            const res = await axios.get(`/api/v1/invoices/${id}/download`, {
-                headers: { Authorization: `Bearer ${token}` },
-                responseType: 'blob'
-            });
-            const blob = new Blob([res.data], { type: res.headers['content-type'] || 'application/pdf' });
-            let filename = `invoice_${id}.pdf`;
-            const disposition = res.headers['content-disposition'] || res.headers['Content-Disposition'];
-            if (disposition) {
-                const match = disposition.match(/filename\*?=([^;]+)/);
-                if (match) filename = match[1].replace(/UTF-8''/, '').replace(/\"/g, '').trim();
-            } else if (invoiceDoc && invoiceDoc.invoiceNo) {
-                filename = `invoice_${invoiceDoc.invoiceNo}.pdf`;
-            }
-            const url = window.URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.setAttribute('download', filename);
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
-            window.URL.revokeObjectURL(url);
-            toast.success('Invoice download started');
-        } catch (err) {
-            console.error('downloadInvoicePdf error', err);
-            toast.error('Failed to download invoice PDF');
-        }
-    };
+    const step1 = ready ? 'done' : 'now';
+    const step2 = demandSaved ? 'done' : (ready && !isAll ? 'now' : '');
+    const step3 = canEmail ? 'now' : '';
+    const share = (v) => `${totals.sale ? (v / totals.sale) * 100 : 0}%`;
 
-    const printInvoice = async (invoiceId = null) => {
-        const id = invoiceId || invoiceDoc?._id;
-        if (!id) return toast.error('No invoice selected');
-        try {
-            const res = await axios.get(`/api/v1/invoices/${id}/download`, {
-                headers: { Authorization: `Bearer ${token}` },
-                responseType: 'blob'
-            });
-            const blob = new Blob([res.data], { type: res.headers['content-type'] || 'application/pdf' });
-            const url = window.URL.createObjectURL(blob);
-            // open in new tab for print
-            const newWin = window.open(url, '_blank');
-            if (!newWin) {
-                // fallback: create iframe
-                const iframe = document.createElement('iframe');
-                iframe.style.display = 'none';
-                iframe.src = url;
-                document.body.appendChild(iframe);
-                setTimeout(() => { iframe.contentWindow.print(); }, 800);
-            } else {
-                newWin.focus();
-            }
-        } catch (err) {
-            console.error('printInvoice error', err);
-            toast.error('Failed to open invoice for printing');
-        }
-    };
-
-    // determine highest record for display (backend-provided or computed locally)
-    const displayHighest = invoiceDoc?.highestRecord || computeHighestFromRecords(invoiceDoc?.records || previewData.overlimit);
-
-    const isSelectedDrawClosed = () => {
-        if (!selectedDraw) return false;
-        if (selectedDraw.isExpired) return true;
-        // fallback: closed if draw_date end-of-day already passed
-        try {
-            const dd = new Date(selectedDraw.draw_date);
-            dd.setHours(23, 59, 59, 999);
-            return dd.getTime() <= Date.now();
-        } catch (e) {
-            return false;
-        }
-    };
+    const thBase = 'sticky z-[1] bg-gray-700 px-3 text-right text-[11px] font-semibold tracking-wide text-gray-300 whitespace-nowrap';
+    const td = 'px-3 py-2 text-right tabular-nums whitespace-nowrap';
+    const sep = 'border-l border-gray-700';
 
     return (
-        <div className="p-6 bg-gray-900 min-h-screen ">
-            <div className="max-w-7xl mx-auto max-h-[80vh] overflow-y-auto">
-            
-                {/* Controls Section */}
-                <div className="bg-gray-800 rounded-lg shadow-md p-6 mb-6  ">
-                    
-                    
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-4">
-                            <div>
-                                <label className="block text-sm font-medium text-white mb-1">Select Draw</label>
-                                <select
-                                    value={selectedDraw?._id || ""}
-                                    onChange={(e) => {
-                                        const id = e.target.value;
-                                        const d = draws.find(x => String(x._id) === String(id)) || null;
-                                        setSelectedDraw(d);
-                                        if (d && d.draw_date) {
-                                            setDrawDate(new Date(d.draw_date).toISOString().split('T')[0]);
-                                        }
-                                    }}
-                                    className="bg-gray-700 w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                >
-                                    <option value="">-- Select draw --</option>
-                                    {draws.map(d => (
-                                        <option key={d._id} value={d._id}>
-                                            {formatDrawOptionLabel(d)}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-                        
-                        <div>
-                            <label className="block text-sm font-medium text-white mb-1">Prize Type</label>
-                            <select
-                                value={prizeType}
-                                onChange={(e) => setPrizeType(e.target.value)}
-                                className="bg-gray-700 w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            >
-                                <option value="Hinsa">Hinsa</option>
-                                <option value="Akra">Akra</option>
-                                <option value="Tandola">Tandola</option>
-                                <option value="Pangora">Pangora</option>
-                                <option value="All">All</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-white mb-1">Party</label>
-                            <select
-                                value={selectedParty?._id || ''}
-                                onChange={(e) => {
-                                    const id = e.target.value;
-                                    const p = parties.find(x => String(x._id) === String(id)) || null;
-                                    setSelectedParty(p);
-                                    setArchiveInfo(null);
-                                }}
-                                className="bg-gray-700 w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            >
-                                <option value="">-- Select party --</option>
-                                {parties.map(p => (
-                                    <option key={p._id} value={p._id}>{p.username} {p.partyCode ? `(${p.partyCode})` : ''}</option>
-                                ))}
-                            </select>
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-white mb-1">Overlimit Snapshot</label>
-                            <select
-                                value={selectedOverlimitSnapshotId}
-                                onChange={(e) => {
-                                    setSelectedOverlimitSnapshotId(e.target.value || 'latest');
-                                    // trigger regenerate preview with the new selection
-                                    setTimeout(() => { generatePreview().catch(() => {}); }, 10);
-                                }}
-                                className="bg-gray-700 w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            >
-                                <option value="latest">Use newest server snapshot</option>
-                                {overlimitSnapshots && overlimitSnapshots.length > 0 && overlimitSnapshots.map(snap => {
-                                    const label = `${new Date(snap.updatedAt || snap.createdAt).toLocaleString()}${snap.data && snap.data.every(d => d && d.archived && d.locked) ? ' (archived)' : ''}`;
-                                    return <option key={snap._id} value={snap._id}>{label}</option>;
-                                })}
-                            </select>
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-white mb-1">DBF Mode</label>
-                            <select
-                                value={dbfMode}
-                                onChange={(e) => setDbfMode(e.target.value)}
-                                className="bg-gray-700 w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            >
-                                <option value="Mohsin">Mohsin</option>
-                                <option value="RLC">RLC</option>
-                            </select>
-                        </div>
+        <div className="min-h-full bg-gray-900 p-4 text-gray-100 md:p-6">
+            <div className="mx-auto flex max-w-7xl flex-col gap-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <h1 className="text-xl font-bold">Purchase Department</h1>
+                        <p className="text-sm text-gray-400">
+                            {selectedDraw ? formatDrawOptionLabel(selectedDraw, { includeStatus: false }) : 'Pick a draw and party to start.'}
+                        </p>
                     </div>
-                    
-                    <div className="flex flex-row items-end gap-4 mb-4 flex-wrap">
-                        <div className="flex flex-col w-56">
-                            <label className="block text-sm font-medium text-white mb-1">First Prize Limit</label>
-                            <input
-                                type="number"
-                                value={firstPrizeLimit}
-                                onChange={(e) => setFirstPrizeLimit(Number(e.target.value))}
-                                className="bg-gray-700 w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                placeholder="Enter first prize limit"
-                                min="0"
-                            />
-                        </div>
-                        <div className="flex flex-col w-56">
-                            <label className="block text-sm font-medium text-white mb-1">Second Prize Limit</label>
-                            <input
-                                type="number"
-                                value={secondPrizeLimit}
-                                onChange={(e) => setSecondPrizeLimit(Number(e.target.value))}
-                                className="bg-gray-700 w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                placeholder="Enter second prize limit"
-                                min="0"
-                            />
-                        </div>
-
-                        <button
-                            onClick={generatePreview}
-                            disabled={isLoading}
-                            className={`px-6 py-2 rounded-md font-medium ${
-                                isLoading
-                                    ? 'bg-gray-400 cursor-not-allowed'
-                                    : 'bg-blue-600 hover:bg-blue-700'
-                            } text-white transition-colors`}
-                        >
-                            {isLoading ? 'Analyzing...' : 'Analyze'}
-                        </button>
-
-                        <button
-                            onClick={async () => {
-                                if (isSelectedDrawClosed()) return toast.error('Draw is closed. Cannot save demand.');
-                                if (!showPreview) return toast.error('Run analysis first');
-                                if (!selectedParty) return toast.error('Select a party first');
-                                if (!selectedDraw) return toast.error('Select a draw first');
-                                const ok = confirm('Save demand records for this party and draw and REPLACE existing demand to match current analysis? Click OK to replace, Cancel to abort.');
-                                if (!ok) return;
-                                const forceProtected = window.confirm('Also update archived/locked overlimit rows? Click OK to update protected rows, Cancel to preserve them.');
-                                setSaveDemandLoading(true);
-                                try {
-                                    const payload = {
-                                        drawId: selectedDraw._id,
-                                        partyId: selectedParty._id,
-                                        records: (previewData.demand || []).map(r => ({ uniqueId: r.uniqueId, firstPrice: r.firstPrice, secondPrice: r.secondPrice })),
-                                        overlimit: previewData.overlimit.map(r => ({ uniqueId: r.uniqueId, firstPrice: r.firstPrice, secondPrice: r.secondPrice })),
-                                        combined: previewData.originalEntries.map(e => ({ uniqueId: e.no || e.uniqueId, firstPrice: e.f || e.firstPrice || 0, secondPrice: e.s || e.secondPrice || 0 })),
-                                        prizeType,
-                                        replace: true,
-                                        forceProtected: !!forceProtected
-                                    };
-                                    const res = await axios.post('/api/v1/data/save-demand', payload, { headers: { Authorization: `Bearer ${token}` } });
-                                    try { console.debug('[Hisab] save-demand response archivedTotals', res.data.archivedTotals); } catch (e) {}
-                                    toast.success(res.data.message || 'Demand saved');
-                                } catch (err) {
-                                    console.error('saveDemand error', err);
-                                    toast.error(err?.response?.data?.error || 'Failed to save demand');
-                                } finally {
-                                    setSaveDemandLoading(false);
-                                }
-                            }}
-                            disabled={isLoading || saveDemandLoading || !showPreview}
-                            className={`px-3 py-2 rounded-md font-medium ${saveDemandLoading ? 'bg-yellow-500' : (isSelectedDrawClosed() ? 'bg-gray-500' : 'bg-blue-600 hover:bg-blue-700')} text-white flex items-center gap-2 ${isSelectedDrawClosed() ? 'cursor-not-allowed' : ''}`}
-                            title={isSelectedDrawClosed() ? 'Draw is closed. Save Demand not allowed.' : 'Save demand records'}
-                        >
-                            {saveDemandLoading ? (
-                                <>
-                                    <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 100 16v-2a6 6 0 110-12v2a4 4 0 100 8v-2z"></path></svg>
-                                    <span>Saving...</span>
-                                </>
-                            ) : (
-                                <span>Save Demand</span>
-                            )}
-                        </button>
-
-                        <button
-                            onClick={async () => {
-                                if (isSelectedDrawClosed()) return toast.error('Draw is closed. Cannot create email.');
-                                if (!showPreview || !previewData.overlimit || previewData.overlimit.length === 0) return toast.error('Run analysis first');
-                                if (!selectedParty) return toast.error('Select a party first');
-                                if (!selectedDraw) return toast.error('Select a draw first');
-                                const ok = window.confirm('Overlimit email will be Locked. OK to proceed?');
-                                if (!ok) return;
-                                setEmailLoading(true);
-                                setEmailStatus('Generating email...');
-                                try {
-                                    await new Promise(r => setTimeout(r, 300));
-                                    const payload = {
-                                        drawId: selectedDraw._id,
-                                        prizeType,
-                                        partyId: selectedParty._id,
-                                        records: previewData.overlimit.map(r => ({ uniqueId: r.uniqueId, firstPrice: r.firstPrice, secondPrice: r.secondPrice })),
-                                        mode: dbfMode
-                                    };
-                                    const res = await axios.post('/api/v1/archives', payload, { headers: { Authorization: `Bearer ${token}` } });
-                                    setEmailStatus('Indexing...');
-                                    await new Promise(r => setTimeout(r, 500));
-                                    setArchiveInfo(res.data.archive);
-                                    if (res.data.invoice) setInvoiceDoc(res.data.invoice);
-                                    setEmailStatus('Completed');
-                                    // Archive created on server and download initiated to user's system
-                                    toast.success('Archive created and download started');
-                                } catch (err) {
-                                        console.error('create+download error', err);
-                                        // If server returned 409 (duplicate archive for same total), fetch existing archive info
-                                        if (err?.response?.status === 409) {
-                                            const invoiceNo = err?.response?.data?.invoiceNo;
-                                            toast.error(err?.response?.data?.error || 'Archive already exists');
-                                            try {
-                                                const archivesRes = await axios.get('/api/v1/archives', {
-                                                    params: { drawId: selectedDraw._id, partyId: selectedParty._id, prizeType },
-                                                    headers: { Authorization: `Bearer ${token}` }
-                                                });
-                                                const list = archivesRes.data.archives || archivesRes.data || [];
-                                                if (list && list.length > 0) {
-                                                    setArchiveInfo(list[0]);
-                                                }
-                                                // attempt to fetch invoice by invoiceNo if provided
-                                                if (invoiceNo) {
-                                                    try {
-                                                        const invRes = await axios.get('/api/v1/invoices', { params: { invoiceNo }, headers: { Authorization: `Bearer ${token}` } });
-                                                        let inv = null;
-                                                        if (invRes.data) {
-                                                            if (Array.isArray(invRes.data.invoices)) inv = invRes.data.invoices[0] || null;
-                                                            else if (invRes.data.invoice) inv = invRes.data.invoice;
-                                                            else if (invRes.data._id) inv = invRes.data;
-                                                        }
-                                                        if (inv) setInvoiceDoc(inv);
-                                                    } catch (ie) {
-                                                        console.debug('Failed to fetch invoice by invoiceNo', ie.message || ie);
-                                                    }
-                                                }
-                                            } catch (fetchErr) {
-                                                console.debug('Failed to fetch existing archives after 409', fetchErr.message || fetchErr);
-                                            }
-                                        } else {
-                                            toast.error(err?.response?.data?.error || 'Failed to create archive');
-                                        }
-                                } finally {
-                                    setEmailLoading(false);
-                                    setEmailStatus('');
-                                }
-                            }}
-                            disabled={isLoading || emailLoading || !showPreview}
-                            className={`px-3 py-2 rounded-md font-medium ${emailLoading ? 'bg-yellow-500' : (isSelectedDrawClosed() ? 'bg-gray-500' : 'bg-green-600 hover:bg-green-700')} text-white flex items-center gap-2 ${isSelectedDrawClosed() ? 'cursor-not-allowed' : ''}`}
-                            title={isSelectedDrawClosed() ? 'Draw is closed. Create Email not allowed.' : 'Create archive and auto-download'}
-                        >
-                            {emailLoading ? (
-                                <>
-                                    <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 100 16v-2a6 6 0 110-12v2a4 4 0 100 8v-2z"></path></svg>
-                                    <span>{emailStatus || 'Generating...'}</span>
-                                </>
-                                ) : (
-                                <>
-                                    <FiMail className="h-5 w-5" aria-hidden="true" />
-                                    <span className="hidden md:inline">Create Email</span>
-                                </>
-                            )}
-                        </button>
-                    </div>
-                    {archiveInfo && (
-                        <p className="text-sm text-yellow-300 mt-2">An overlimit archive exists for this selection — overlimit rows are archived/locked, but Analyze and Save Demand are still allowed (archived rows will be preserved).</p>
+                    {selectedDraw && (
+                        <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${drawClosed ? 'bg-red-500/15 text-red-400' : 'bg-emerald-500/15 text-emerald-400'}`}>
+                            <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                            {drawClosed ? 'Draw closed' : 'Draw open'}
+                        </span>
                     )}
                 </div>
 
-                {/* Preview Results and Invoice (three-column layout) */}
-                {showPreview && (
-                    <div className="space-y-6">
-                        {/* Summary Cards (full width) */}
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                            <div className="bg-blue-100 border border-blue-300 rounded-lg p-4">
-                                <h3 className="text-lg font-semibold text-blue-800 mb-2">Original Data</h3>
-                                <p className="text-sm text-blue-600">
-                                    Entries: {previewData.originalEntries.length}<br />
-                                    Total: {calculateTotals(previewData.originalEntries.map(e => ({ firstPrice: e.f, secondPrice: e.s }))).total}
-                                </p>
-                            </div>
-
-                            <div className="bg-green-100 border border-green-300 rounded-lg p-4">
-                                <h3 className="text-lg font-semibold text-green-800 mb-2">Demand (Within Limit)</h3>
-                                <p className="text-sm text-green-600">
-                                    Entries: {previewData.demand.length}<br />
-                                    Total: {calculateTotals(previewData.demand).total}
-                                </p>
-                            </div>
-
-                            <div className="bg-red-100 border border-red-300 rounded-lg p-4">
-                                <h3 className="text-lg font-semibold text-red-800 mb-2">Overlimit</h3>
-                                <p className="text-sm text-red-600">
-                                    Entries: {previewData.overlimit.length}<br />
-                                    Total: {calculateTotals(previewData.overlimit).total}
-                                </p>
-                            </div>
+                {/* Settings */}
+                <section className="grid gap-3.5 rounded-xl border border-gray-700 bg-gray-800 p-4" aria-label="Analysis settings">
+                    <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        <div className="flex min-w-0 flex-col gap-1.5">
+                            <label htmlFor="pd-draw" className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Draw</label>
+                            <select
+                                id="pd-draw"
+                                value={selectedDraw?._id || ''}
+                                onChange={(e) => setSelectedDraw(draws.find((d) => String(d._id) === e.target.value) || null)}
+                                className="w-full rounded-lg border border-gray-600 bg-gray-700 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            >
+                                <option value="">Select draw</option>
+                                {draws.map((d) => <option key={d._id} value={d._id}>{formatDrawOptionLabel(d)}</option>)}
+                            </select>
                         </div>
+                        <div className="flex min-w-0 flex-col gap-1.5">
+                            <label htmlFor="pd-party" className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Party</label>
+                            <select
+                                id="pd-party"
+                                value={selectedParty?._id || ''}
+                                onChange={(e) => setSelectedParty(parties.find((p) => String(p._id) === e.target.value) || null)}
+                                className="w-full rounded-lg border border-gray-600 bg-gray-700 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            >
+                                <option value="">Select party</option>
+                                {parties.map((p) => <option key={p._id} value={p._id}>{p.username}{p.partyCode ? ` (${p.partyCode})` : ''}</option>)}
+                            </select>
+                        </div>
+                        <Segmented label="Prize type" options={PRIZE_TYPES} value={prizeType} onChange={setPrizeType} disabled={analyzing || working} />
+                        <Segmented label="DBF format" options={DBF_MODES} value={dbfMode} onChange={setDbfMode} disabled={working} />
+                    </div>
 
-                        {/* Three columns: Demand | Overlimit | Invoice */}
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                            {/* Demand column */}
-                            <div>
-                                {previewData.demand.length > 0 ? (
-                                    <div className="bg-white rounded-lg shadow-md p-6 h-full flex flex-col">
-                                        <h3 className="text-xl font-semibold text-green-800 mb-4">Demand Entries (Within Limit)</h3>
-                                        <div className="flex items-center justify-between mb-2">
-                                            <div />
-                                            <div className="flex items-center gap-2"></div>
-                                        </div>
-                                        <div className="overflow-y-auto max-h-[72vh] overflow-x-auto">
-                                            <table className="min-w-full table-auto">
-                                                <thead className="bg-green-50 sticky top-0 z-10">
-                                                    <tr>
-                                                        <th className="px-4 py-2 text-left text-sm font-medium text-green-700">Number</th>
-                                                        <th className="px-4 py-2 text-left text-sm font-medium text-green-700">First Price</th>
-                                                        <th className="px-4 py-2 text-left text-sm font-medium text-green-700">Second Price</th>
-                                                        <th className="px-4 py-2 text-left text-sm font-medium text-green-700">Total</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody className="divide-y divide-gray-200">
-                                                    {previewData.demand.map((item, index) => (
-                                                        <tr key={index} className="hover:bg-gray-50">
-                                                            <td className="px-4 py-2 text-sm text-gray-900">{item.uniqueId}</td>
-                                                            <td className="px-4 py-2 text-sm text-gray-900">{item.firstPrice}</td>
-                                                            <td className="px-4 py-2 text-sm text-gray-900">{item.secondPrice}</td>
-                                                            <td className="px-4 py-2 text-sm text-gray-900">{item.firstPrice + item.secondPrice}</td>
-                                                        </tr>
-                                                    ))}
-                                                </tbody>
-                                            </table>
-                                        </div>
+                    <form
+                        className="grid grid-cols-2 items-end gap-3 md:grid-cols-[1fr_1fr_auto]"
+                        onSubmit={(e) => { e.preventDefault(); runAnalyze(); }}
+                    >
+                        <div className="flex min-w-0 flex-col gap-1.5">
+                            <label htmlFor="pd-l1" className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">First prize limit</label>
+                            <input
+                                id="pd-l1" type="number" min="0" inputMode="numeric" placeholder="e.g. 100"
+                                value={limit1} onChange={onLimitChange(setLimit1)}
+                                className={`w-full rounded-lg border bg-gray-700 px-3 py-2 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 ${limitError && String(limit1).trim() === '' ? 'border-amber-400' : 'border-gray-600'}`}
+                            />
+                        </div>
+                        <div className="flex min-w-0 flex-col gap-1.5">
+                            <label htmlFor="pd-l2" className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Second prize limit</label>
+                            <input
+                                id="pd-l2" type="number" min="0" inputMode="numeric" placeholder="e.g. 50"
+                                value={limit2} onChange={onLimitChange(setLimit2)}
+                                className={`w-full rounded-lg border bg-gray-700 px-3 py-2 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 ${limitError && String(limit2).trim() === '' ? 'border-amber-400' : 'border-gray-600'}`}
+                            />
+                        </div>
+                        <button
+                            type="submit"
+                            disabled={analyzing || working}
+                            className="col-span-2 inline-flex min-w-[140px] items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 py-2 font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60 md:col-span-1"
+                        >
+                            {analyzing ? <><Spinner />Analyzing…</> : 'Analyze'}
+                        </button>
+                    </form>
 
-                                        {/* Totals for Demand (always visible below the scroll area) */}
-                                        <div className="mt-3 bg-green-50 p-3 rounded text-sm text-green-800 font-semibold">
-                                            <div className="flex justify-between">
-                                                <span>Total</span>
-                                                <div className="flex gap-6">
-                                                    <span>F: {calculateTotals(previewData.demand).first}</span>
-                                                    <span>S: {calculateTotals(previewData.demand).second}</span>
-                                                    <span>Total: {calculateTotals(previewData.demand).total}</span>
-                                                </div>
-                                            </div>
-                                        </div>
+                    <p className={`text-[13px] ${limitError || stale ? 'text-amber-400' : 'text-gray-400'}`}>
+                        {limitError
+                            ? 'Enter both limits first. Type 0 if nothing should stay in demand.'
+                            : stale
+                                ? 'Limits changed. Press Analyze to update the numbers.'
+                                : 'Enter both limits, then press Analyze (or Enter). 0 means nothing stays in demand.'}
+                    </p>
+                </section>
+
+                <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+                    <div className={`flex min-w-0 flex-col gap-4 ${stale ? 'opacity-60' : ''}`}>
+                        {result && (
+                            <>
+                                <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+                                    <Stat label="Total sale" value={totals.sale} note={plural(rows.length, 'number')} />
+                                    <Stat label="Demand (within limit)" value={totals.demand} note="kept with you" tone="demand" />
+                                    <Stat label="Overlimit (new)" value={totals.over} note={overRows.length ? `${plural(overRows.length, 'number')} to party` : 'nothing new to send'} tone="over" />
+                                    <Stat label="Already emailed" value={totals.sent} note={archives.length ? `${plural(archives.length, 'email')} before` : 'no emails yet'} tone="muted" />
+                                </div>
+                                <div className="flex h-2 overflow-hidden rounded-full bg-gray-700" aria-hidden="true">
+                                    <span className="h-full bg-emerald-400 transition-all" style={{ width: share(totals.demand) }} />
+                                    <span className="h-full bg-red-400 transition-all" style={{ width: share(totals.over) }} />
+                                    <span className="h-full bg-gray-500 transition-all" style={{ width: share(totals.sentInBar) }} />
+                                </div>
+                            </>
+                        )}
+
+                        <section className="min-w-0 rounded-xl border border-gray-700 bg-gray-800" aria-label="Numbers">
+                            <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-gray-700 px-4 py-3">
+                                <h2 className="text-base font-semibold">Numbers</h2>
+                                {result && (
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {[['all', 'All', rows.length], ['over', 'Overlimit', overRows.length], ['within', 'Within limit', rows.length - overRows.length]].map(([key, label, count]) => (
+                                            <button
+                                                key={key}
+                                                type="button"
+                                                aria-pressed={filter === key}
+                                                onClick={() => setFilter(key)}
+                                                className={`rounded-full border px-3 py-1 text-[13px] ${filter === key ? 'border-gray-500 bg-gray-700 text-gray-100' : 'border-gray-700 text-gray-400 hover:text-gray-200'}`}
+                                            >
+                                                {label} {count}
+                                            </button>
+                                        ))}
                                     </div>
-                                ) : (
-                                    <div className="bg-yellow-100 border border-yellow-300 rounded-lg p-4 text-center">No demand entries.</div>
                                 )}
                             </div>
 
-                            {/* Overlimit column */}
-                            <div>
-                                {previewData.overlimit.length > 0 ? (
-                                    <div className="bg-white rounded-lg shadow-md p-6 h-full flex flex-col">
-                                        <h3 className="text-xl font-semibold text-red-800 mb-4">Overlimit Entries</h3>
-                                        <div className="overflow-y-auto max-h-[72vh] overflow-x-auto">
-                                            <table className="min-w-full table-auto">
-                                                <thead className="bg-red-50 sticky top-0 z-10">
-                                                    <tr>
-                                                        <th className="px-4 py-2 text-left text-sm font-medium text-red-700">Number</th>
-                                                        <th className="px-4 py-2 text-left text-sm font-medium text-red-700">First Price</th>
-                                                        <th className="px-4 py-2 text-left text-sm font-medium text-red-700">Second Price</th>
-                                                        <th className="px-4 py-2 text-left text-sm font-medium text-red-700">Total</th>
+                            {analyzing && !result ? (
+                                <div className="flex flex-col gap-2.5 p-4">
+                                    {Array.from({ length: 7 }).map((_, i) => <div key={i} className="h-[18px] animate-pulse rounded-md bg-gray-700" />)}
+                                </div>
+                            ) : !result ? (
+                                <div className="flex flex-col items-center gap-2 px-5 py-12 text-center text-sm text-gray-400">
+                                    <strong className="text-[15px] text-gray-100">No analysis yet</strong>
+                                    <span>Enter the first and second prize limits and press Analyze.</span>
+                                    <span>Each number will show its sale, the part kept as demand, and the overlimit for the party.</span>
+                                </div>
+                            ) : visibleRows.length === 0 ? (
+                                <div className="px-5 py-12 text-center text-sm text-gray-400">
+                                    <strong className="block text-[15px] text-gray-100">Nothing here</strong>
+                                    {rows.length ? 'No numbers match this filter.' : 'No sale for this draw and prize type.'}
+                                </div>
+                            ) : (
+                                <div className="max-h-[60vh] overflow-auto">
+                                    <table className="w-full border-collapse text-sm">
+                                        <thead>
+                                            <tr>
+                                                <th className={`${thBase} top-0 pt-1.5 text-left`} />
+                                                <th colSpan={2} className={`${thBase} ${sep} top-0 pt-1.5 text-center uppercase`}>Sale</th>
+                                                <th colSpan={2} className={`${thBase} ${sep} top-0 pt-1.5 text-center uppercase text-emerald-400`}>Demand</th>
+                                                <th colSpan={2} className={`${thBase} ${sep} top-0 pt-1.5 text-center uppercase text-red-400`}>Overlimit</th>
+                                            </tr>
+                                            <tr>
+                                                <th className={`${thBase} top-[26px] pb-2 text-left`}>Number</th>
+                                                <th className={`${thBase} ${sep} top-[26px] pb-2`}>First</th>
+                                                <th className={`${thBase} top-[26px] pb-2`}>Second</th>
+                                                <th className={`${thBase} ${sep} top-[26px] pb-2`}>First</th>
+                                                <th className={`${thBase} top-[26px] pb-2`}>Second</th>
+                                                <th className={`${thBase} ${sep} top-[26px] pb-2`}>First</th>
+                                                <th className={`${thBase} top-[26px] pb-2`}>Second</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {visibleRows.map((r) => {
+                                                const isOver = r.of + r.os > 0;
+                                                const val = (v, cls) => <td className={`${td} ${v ? cls : 'text-gray-500'}`}>{fmt(v)}</td>;
+                                                return (
+                                                    <tr key={r.no} className="border-t border-gray-700 hover:bg-white/[0.03]">
+                                                        <td className="whitespace-nowrap px-3 py-2 text-left text-[15px] font-bold tracking-wide">
+                                                            {r.no}
+                                                            {isOver && <span className="ml-2 rounded bg-red-500/15 px-1.5 py-0.5 align-[2px] text-[10px] font-bold uppercase tracking-wider text-red-400">over</span>}
+                                                        </td>
+                                                        <td className={`${td} ${sep}`}>{fmt(r.f)}</td>
+                                                        <td className={td}>{fmt(r.s)}</td>
+                                                        <td className={`${td} ${sep} ${r.df ? 'text-emerald-400' : 'text-gray-500'}`}>{fmt(r.df)}</td>
+                                                        {val(r.ds, 'text-emerald-400')}
+                                                        <td className={`${td} ${sep} ${r.of ? 'font-semibold text-red-400' : 'text-gray-500'}`}>{fmt(r.of)}</td>
+                                                        {val(r.os, 'font-semibold text-red-400')}
                                                     </tr>
-                                                </thead>
-                                                <tbody className="divide-y divide-gray-200">
-                                                    {previewData.overlimit.map((item, index) => (
-                                                        <tr key={index} className="hover:bg-gray-50">
-                                                            <td className="px-4 py-2 text-sm text-gray-900">{item.uniqueId}</td>
-                                                            <td className="px-4 py-2 text-sm text-gray-900">{item.firstPrice}</td>
-                                                            <td className="px-4 py-2 text-sm text-gray-900">{item.secondPrice}</td>
-                                                            <td className="px-4 py-2 text-sm text-gray-900">{item.firstPrice + item.secondPrice}</td>
-                                                        </tr>
-                                                    ))}
-                                                </tbody>
-                                            </table>
-                                        </div>
-
-                                        {/* Totals for Overlimit (always visible below the scroll area) */}
-                                        <div className="mt-3 bg-red-50 p-3 rounded text-sm text-red-800 font-semibold">
-                                            <div className="flex justify-between">
-                                                <span>Total</span>
-                                                <div className="flex gap-6">
-                                                    <span>F: {calculateTotals(previewData.overlimit).first}</span>
-                                                    <span>S: {calculateTotals(previewData.overlimit).second}</span>
-                                                    <span>Total: {calculateTotals(previewData.overlimit).total}</span>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <div className="bg-yellow-100 border border-yellow-300 rounded-lg p-4 text-center">No overlimit entries.</div>
-                                )}
-                            </div>
-
-                            {/* Invoice column */}
-                            <div>
-                                <div className="bg-white rounded-lg shadow-md p-6 h-full flex flex-col">
-                                    <h3 className="text-lg font-semibold text-gray-900 mb-3">Invoice Preview</h3>
-                                    <div className="text-sm text-gray-700 mb-2">
-                                        <div><strong>Draw Date:</strong> {selectedDraw?.draw_date ? new Date(selectedDraw.draw_date).toLocaleDateString() : drawDate}</div>
-                                        <div><strong>Party:</strong> {selectedParty?.username || selectedParty?._id} {selectedParty?.partyCode ? `(${selectedParty.partyCode})` : ''}</div>
-                                        <div><strong>Type:</strong> {prizeType}</div>
-                                    </div>
-
-                                    <div className="mb-3">
-                                        <p className="text-sm text-gray-600">Archive: <span className="text-gray-900">{archiveInfo?.fileName || archiveInfo?._id}</span></p>
-                                        {invoiceDoc ? (
-                                            <p className="text-sm text-gray-600">Invoice No: <span className="text-gray-900">{invoiceDoc.invoiceNo}</span></p>
-                                        ) : (
-                                            <div className="mt-2">
-                                                <button onClick={() => fetchInvoiceByArchive(archiveInfo?._id)} disabled={invoiceLoading} className={`px-3 py-2 rounded-md font-medium ${invoiceLoading ? 'bg-yellow-500' : 'bg-indigo-600 hover:bg-indigo-700'} text-white`}>{invoiceLoading ? 'Loading...' : 'Fetch Invoice'}</button>
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    <div className="max-h-[72vh] overflow-auto border border-gray-200">
-                                        <table className="min-w-full table-auto">
-                                            <thead>
-                                                <tr className="bg-gray-100">
-                                                    <th className="px-3 py-2 text-left text-sm font-medium text-gray-700">Number</th>
-                                                    <th className="px-3 py-2 text-right text-sm font-medium text-gray-700">F Prize</th>
-                                                    <th className="px-3 py-2 text-right text-sm font-medium text-gray-700">S Prize</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {(invoiceDoc?.records || previewData.overlimit || []).map((r, i) => (
-                                                    <tr key={i} className="border-b border-gray-100">
-                                                        <td className="px-3 py-2 text-sm text-gray-900">{r.number || r.uniqueId}</td>
-                                                        <td className="px-3 py-2 text-sm text-right text-gray-900">{(r.fPrize || r.firstPrice || 0).toFixed ? (r.fPrize || r.firstPrice || 0).toFixed(2) : (r.fPrize || r.firstPrice || 0)}</td>
-                                                        <td className="px-3 py-2 text-sm text-right text-gray-900">{(r.sPrize || r.secondPrice || 0).toFixed ? (r.sPrize || r.secondPrice || 0).toFixed(2) : (r.sPrize || r.secondPrice || 0)}</td>
-                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                        <tfoot>
+                                            <tr className="font-bold">
+                                                <td className="sticky bottom-0 border-t border-gray-600 bg-gray-700 px-3 py-2 text-left">Total</td>
+                                                {[['f', ''], ['s', ''], ['df', 'text-emerald-400'], ['ds', 'text-emerald-400'], ['of', 'text-red-400'], ['os', 'text-red-400']].map(([k, cls], i) => (
+                                                    <td key={k} className={`sticky bottom-0 border-t border-gray-600 bg-gray-700 ${td} ${i % 2 === 0 ? sep : ''} ${cls}`}>{fmt(sumOf(visibleRows, [k]))}</td>
                                                 ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
+                                            </tr>
+                                        </tfoot>
+                                    </table>
+                                </div>
+                            )}
+                        </section>
+                    </div>
 
-                                    <div className="mt-4 border-t border-gray-100 pt-3 text-sm text-gray-800">
-                                        <div><strong>Total records:</strong> {invoiceDoc?.recordCount ?? previewData.overlimit.length}</div>
-                                        <div><strong>Record type:</strong> {prizeType}</div>
-                                        <div><strong>Total prize:</strong> {((invoiceDoc?.records || previewData.overlimit || []).reduce((s, x) => s + (Number(x.fPrize || x.firstPrice || 0) + Number(x.sPrize || x.secondPrice || 0)), 0)).toFixed(2)}</div>
-                                        <div><strong>Highest:</strong> {displayHighest?.number || '-'} {displayHighest ? `(F:${(displayHighest.fPrize||0).toFixed(2)} S:${(displayHighest.sPrize||0).toFixed(2)})` : ''}</div>
-                                    </div>
+                    <aside className="flex min-w-0 flex-col gap-4">
+                        <section className="rounded-xl border border-gray-700 bg-gray-800" aria-label="Steps">
+                            <div className="flex items-center justify-between gap-2 border-b border-gray-700 px-4 py-3">
+                                <h2 className="text-base font-semibold">Steps</h2>
+                                <span className="text-xs text-gray-400">{selectedParty?.username || 'No party'} · {prizeType}</span>
+                            </div>
+                            <div className="px-4 pb-4 pt-1">
+                                <Step n={1} title="Analyze" state={step1}>
+                                    <p className="mb-2 text-[12.5px] text-gray-400">
+                                        {ready ? `Done with limits ${fmt(result.l1)} / ${fmt(result.l2)}.` : stale ? 'Limits changed. Press Analyze again.' : 'Enter limits and press Analyze.'}
+                                    </p>
+                                </Step>
+                                <Step n={2} title="Save demand" state={step2}>
+                                    <p className="mb-2 text-[12.5px] text-gray-400">
+                                        {isAll ? '"All" is for viewing only. Pick one prize type to save.' : 'Keeps the within-limit amount with you.'}
+                                    </p>
+                                    <button
+                                        type="button"
+                                        disabled={!canSave || working}
+                                        onClick={() => setModal('save')}
+                                        className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-45"
+                                    >
+                                        <FiSave aria-hidden="true" />
+                                        {demandSaved ? 'Demand saved' : `Save Demand${ready ? ` · ${fmt(totals.demand)}` : ''}`}
+                                    </button>
+                                </Step>
+                                <Step n={3} title="Create email" state={step3}>
+                                    <p className="mb-2 text-[12.5px] text-gray-400">Makes the DBF file and invoice for the party, then downloads it.</p>
+                                    <button
+                                        type="button"
+                                        disabled={!canEmail || working}
+                                        onClick={() => setModal('email')}
+                                        className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-green-600 px-4 py-2 font-semibold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-45"
+                                    >
+                                        <FiMail aria-hidden="true" />
+                                        {`Create Email${ready ? ` · ${fmt(totals.over)}` : ''}`}
+                                    </button>
+                                    {drawClosed && <p className="mt-1.5 text-xs text-red-400">Draw is closed. Demand and emails can no longer change.</p>}
+                                    {emailNote && <p className="mt-1.5 text-xs text-amber-400">{emailNote}</p>}
+                                </Step>
+                            </div>
+                        </section>
 
-                                    <div className="mt-4 flex items-center gap-2">
-                                        {invoiceDoc && <button onClick={() => downloadInvoicePdf()} className="px-3 py-2 rounded-md bg-green-600 hover:bg-green-700 text-white">Download PDF</button>}
-                                        {invoiceDoc && <button onClick={() => printInvoice()} className="px-3 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-white">Print</button>}
-                                        <button onClick={() => fetchInvoiceByArchive(archiveInfo?._id)} className="px-3 py-2 rounded-md bg-gray-200 hover:bg-gray-300 text-gray-900">Refresh</button>
-                                    </div>
+                        <section className="rounded-xl border border-gray-700 bg-gray-800" aria-label="Emails sent">
+                            <div className="flex items-center justify-between gap-2 border-b border-gray-700 px-4 py-3">
+                                <h2 className="text-base font-semibold">Emails sent</h2>
+                                <div className="flex items-center gap-2 text-xs text-gray-400">
+                                    {archives.length}
+                                    <button type="button" onClick={loadArchives} title="Refresh" className="rounded p-1 hover:bg-gray-700"><FiRefreshCw aria-hidden="true" /><span className="sr-only">Refresh</span></button>
                                 </div>
                             </div>
+                            {archives.length === 0 ? (
+                                <p className="px-4 py-3.5 text-[12.5px] text-gray-400">
+                                    {selectedDraw && selectedParty ? 'No email created for this draw, party and prize type yet.' : 'Pick a draw and party to see their emails.'}
+                                </p>
+                            ) : (
+                                <ul className="max-h-[420px] overflow-y-auto">
+                                    {archives.map((a) => {
+                                        const total = (a.overlimitRecords || []).reduce((t, r) => t + (Number(r.fPrize) || 0) + (Number(r.sPrize) || 0), 0);
+                                        return (
+                                            <li key={a._id} className="grid gap-1.5 border-t border-gray-700 px-4 py-3 first:border-t-0">
+                                                <div className="flex justify-between gap-2 text-[13.5px] font-semibold">
+                                                    <span>{a.invoiceNo ? `Invoice #${a.invoiceNo}` : 'Email'}{isAll ? ` · ${a.prizeType}` : ''}</span>
+                                                    <span className="tabular-nums">{fmt(total)}</span>
+                                                </div>
+                                                <div className="break-all text-xs text-gray-400">
+                                                    {a.fileName} · {plural(a.recordCount ?? (a.overlimitRecords || []).length, 'number')} · {new Date(a.createdAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                                                </div>
+                                                <div className="flex gap-1.5">
+                                                    <button type="button" onClick={() => downloadZip(a)} className="inline-flex items-center gap-1 rounded-md border border-gray-600 bg-gray-700 px-2.5 py-1 text-xs font-semibold hover:bg-gray-600"><FiDownload aria-hidden="true" />ZIP</button>
+                                                    <button type="button" onClick={() => downloadInvoice(a.invoiceId, a.invoiceNo)} disabled={!a.invoiceId} className="inline-flex items-center gap-1 rounded-md border border-gray-600 bg-gray-700 px-2.5 py-1 text-xs font-semibold hover:bg-gray-600 disabled:opacity-45"><FiFileText aria-hidden="true" />Invoice PDF</button>
+                                                </div>
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            )}
+                        </section>
+                    </aside>
+                </div>
+            </div>
+
+            {modal && result && (
+                <div
+                    className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4"
+                    onMouseDown={(e) => { if (e.target === e.currentTarget && !working) setModal(null); }}
+                    onKeyDown={(e) => { if (e.key === 'Escape' && !working) setModal(null); }}
+                >
+                    <div role="dialog" aria-modal="true" aria-labelledby="pd-modal-title" className="flex w-full max-w-md flex-col gap-3.5 rounded-xl border border-gray-700 bg-gray-800 p-5">
+                        <h3 id="pd-modal-title" className="text-lg font-bold">{modal === 'save' ? 'Save demand?' : 'Create email?'}</h3>
+                        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
+                            {(modal === 'save'
+                                ? [['Party', `${selectedParty.username}${selectedParty.partyCode ? ` (${selectedParty.partyCode})` : ''}`], ['Prize type', prizeType], ['Limits', `${fmt(result.l1)} / ${fmt(result.l2)}`], ['Demand total', fmt(totals.demand)]]
+                                : [['Party', `${selectedParty.username}${selectedParty.partyCode ? ` (${selectedParty.partyCode})` : ''}`], ['Prize type', prizeType], ['Numbers', overRows.length], ['Overlimit total', fmt(totals.over)], ['DBF format', dbfMode]]
+                            ).map(([k, v]) => (
+                                <React.Fragment key={k}>
+                                    <dt className="text-gray-400">{k}</dt>
+                                    <dd className="text-right font-semibold tabular-nums">{v}</dd>
+                                </React.Fragment>
+                            ))}
+                        </dl>
+                        <p className="rounded-lg bg-amber-400/10 px-3 py-2 text-[12.5px] text-amber-300">
+                            {modal === 'save'
+                                ? 'This replaces the saved demand for this party and prize type. Emailed numbers stay as they are.'
+                                : 'These overlimit amounts will be locked and will not appear in the next email.'}
+                        </p>
+                        <div className="flex justify-end gap-2">
+                            <button type="button" disabled={working} onClick={() => setModal(null)} className="rounded-lg border border-gray-600 px-4 py-2 font-semibold hover:bg-gray-700 disabled:opacity-50">Cancel</button>
+                            <button
+                                type="button"
+                                autoFocus
+                                disabled={working}
+                                onClick={modal === 'save' ? saveDemand : createEmail}
+                                className={`inline-flex min-w-[150px] items-center justify-center gap-2 rounded-lg px-4 py-2 font-semibold text-white disabled:opacity-70 ${modal === 'save' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-green-600 hover:bg-green-700'}`}
+                            >
+                                {working ? <><Spinner />Working…</> : modal === 'save' ? 'Save demand' : 'Create and download'}
+                            </button>
                         </div>
                     </div>
-                )}
-            </div>
-            
+                </div>
+            )}
         </div>
-        
     );
-
-    
 };
 
 export default Hisab;

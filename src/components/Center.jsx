@@ -11,6 +11,7 @@ import { FaSignOutAlt } from 'react-icons/fa';
 import toast from 'react-hot-toast';
 
 import Spinner from './Spinner'
+import DistributorSaleView from './DistributorSaleView';
 import { useDrawsAutoSync } from '../hooks/useDrawsAutoSync';
 import { isDrawVisibleForSell, isDrawVisibleForHistory, formatDrawOptionLabel } from '../utils/drawVisibility';
 import "jspdf-autotable";
@@ -54,6 +55,18 @@ const formatRemaining = (ms) => {
 };
 
 const getEntryKey = (entry) => entry?.objectId || entry?._tempId || entry?.id;
+
+// Saved Data documents -> table rows.
+const toVoucherRows = (records) => (records || []).flatMap((record) =>
+  (record?.data || []).map((item) => ({
+    parentId: record._id,
+    objectId: item._id,
+    no: item.uniqueId,
+    f: item.firstPrice,
+    s: item.secondPrice,
+    selected: false,
+  }))
+);
 
 const DrawCountdown = React.memo(function DrawCountdown({ selectedDraw }) {
   const [remainingMs, setRemainingMs] = useState(null);
@@ -412,7 +425,7 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
   const [drawDate, setDrawDate] = useState(new Date().toISOString().split('T')[0]); // date
   const { draws } = useDrawsAutoSync({
     tokenCandidates: [token, localStorage.getItem('token'), localStorage.getItem('adminToken')],
-    pollMs: 5000,
+    pollMs: 30000,
   });
   const [selectedDraw, setSelectedDraw] = useState(null);
   const [closingTime, setClosingTime] = useState("");
@@ -422,6 +435,22 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
   // Authoritative voucher data used for optimistic updates and fast UI show
   const [voucherData, setVoucherData] = useState([]);
   const voucherDataRef = useRef(voucherData);
+  // Entry save queue (see flushSaveQueue).
+  const saveQueueRef = useRef([]);
+  const saveInFlightRef = useRef(false);
+  const tempSeqRef = useRef(0);
+  const selectedDrawIdRef = useRef(null);
+  selectedDrawIdRef.current = selectedDraw?._id || null;
+  const userRef = useRef(userData?.user);
+  userRef.current = userData?.user;
+
+  // Show the balance the server returned, without reloading the profile.
+  const syncBalance = (newBalance) => {
+    const current = userRef.current;
+    if (current && typeof newBalance === 'number' && Number.isFinite(newBalance)) {
+      dispatch(setUser({ ...current, balance: newBalance }));
+    }
+  };
   const [no, setNo] = useState('');
   const [f, setF] = useState('');
   const [s, setS] = useState('');
@@ -440,6 +469,9 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
   const [importing, setImporting] = useState(false);
   const [parties, setParties] = useState([]);
   const [clients, setClients] = useState([]);
+  // Distributor Sell Department: totals of the client sale view, and a key to reload it after a DBF import.
+  const [clientSaleSummary, setClientSaleSummary] = useState(null);
+  const [clientSaleRefreshKey, setClientSaleRefreshKey] = useState(0);
 
   const [selectedEntries, setSelectedEntries] = useState([]);
   const [file, setFile] = useState(null);
@@ -553,6 +585,9 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
 
   // When selected draw changes, refresh dependent data (voucher, winning numbers, demand/overlimit)
   useEffect(() => {
+    // A selection belongs to the draw it was made in.
+    setSelectedEntries([]);
+    setSelectAll(false);
     if (selectedDraw) {
       // these functions are defined below in the component
       try {
@@ -570,7 +605,8 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
       // When draw is deselected, clear displayed entries so table is empty
       setEntries([]);
     }
-  }, [selectedDraw]);
+    // Keyed on the id: a poll that only refreshes the draw's details must not reload the table.
+  }, [selectedDraw?._id]);
 
   // reset model popup 
   const closeSmsModal = () => {
@@ -725,81 +761,102 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
       secondPrice: Number(entry.s) || 0,
     }));
 
-    const payload = { data: formattedData };
-    if (selectedDraw && selectedDraw._id) {
-      payload.drawId = selectedDraw._id;
-    } else {
+    if (!(selectedDraw && selectedDraw._id)) {
       toast.error("Please select a draw before saving.");
       return;
     }
+    const drawId = selectedDraw._id;
 
-    // Snapshot for rollback
-    const prev = voucherDataRef.current || entries || [];
+    // Show the rows at once. Each call is one record (one delete button), as before.
+    const batchId = `batch_${++tempSeqRef.current}`;
+    const tempItems = formattedData.map((item) => {
+      const tempId = `temp_${++tempSeqRef.current}`;
+      return {
+        parentId: null,
+        objectId: undefined,
+        no: item.uniqueId,
+        f: item.firstPrice,
+        s: item.secondPrice,
+        selected: false,
+        _tempId: tempId,
+        id: tempId,
+        _batchId: batchId,
+        _drawId: drawId,
+      };
+    });
+    setVoucherData(prevArr => [...prevArr, ...tempItems]);
+    setEntries(prevArr => [...prevArr, ...tempItems]);
 
-    // Create temporary items to show immediately in UI (use _tempId to identify)
-    const now = Date.now();
-    const batchId = `batch_${now}`;
-    const tempItems = formattedData.map((item, idx) => ({
-      parentId: null,
-      objectId: undefined,
-      no: item.uniqueId,
-      f: item.firstPrice,
-      s: item.secondPrice,
-      selected: false,
-      _tempId: `temp_${now}_${idx}`,
-      id: `temp_${now}_${idx}`,
-      _batchId: batchId,
-    }));
+    saveQueueRef.current.push({ drawId, batchId, rows: formattedData });
+    flushSaveQueue();
+  };
 
-    // Optimistically update UI (do not clear input fields here — keep existing input flow)
-    setVoucherData(prevArr => [ ...prevArr , ...tempItems]);
-    setEntries(prevArr => [ ...prevArr, ...tempItems]);
-    toast.success("Record queued for save ✅");
+  // Only one add-data request is in flight at a time. Records typed while it runs
+  // wait here and go together in the next request (still one record each), so fast
+  // typing never races on the balance and rows keep their typing order.
+  const flushSaveQueue = async () => {
+    if (saveInFlightRef.current || saveQueueRef.current.length === 0) return;
+    const { drawId } = saveQueueRef.current[0];
+    const batch = saveQueueRef.current.filter((q) => q.drawId === drawId);
+    saveQueueRef.current = saveQueueRef.current.filter((q) => q.drawId !== drawId);
+    saveInFlightRef.current = true;
+
+    const batchIds = new Set(batch.map((q) => q.batchId));
+    const withoutBatch = (rows) => rows.filter((row) => !batchIds.has(row?._batchId));
+    const rowCount = batch.reduce((n, q) => n + q.rows.length, 0);
 
     try {
-      // Send to server (do not block UI on final refresh)
-      const response = await axios.post("/api/v1/data/add-data", payload, {
-        headers: { Authorization: `Bearer ${token}` },
-        // timeout: 10000,
+      const response = await axios.post("/api/v1/data/add-data", {
+        drawId,
+        groups: batch.map((q) => q.rows),
+      }, {
+        headers: { Authorization: `Bearer ${localStorage.getItem("token") || token}` },
       });
+      syncBalance(response.data?.newBalance);
 
-      // If server returns created data, reconcile quickly
-      const created = response.data?.data || response.data?.created || null;
-      if (Array.isArray(created) && created.length > 0) {
-        // Flatten created entries into table rows if API returns parent docs
-        const createdRows = created.flatMap((record) =>
-          (record.data || []).map(item => ({
-            parentId: record._id || null,
-            objectId: item._id,
-            no: item.uniqueId,
-            f: item.firstPrice,
-            s: item.secondPrice,
-            selected: false,
-          }))
-        );
+      const createdDocs = response.data?.newDataList || (response.data?.newData ? [response.data.newData] : []);
+      const savedByBatch = new Map(batch.map((q, i) => [q.batchId, toVoucherRows(createdDocs[i] ? [createdDocs[i]] : [])]));
 
-        // Replace temp items for matching uniqueIds, otherwise prepend created rows
-        setVoucherData(prevArr => {
-          const uniqueIds = new Set(createdRows.map(r => r.no));
-          const remaining = prevArr.filter(p => !p._tempId || !uniqueIds.has(p.no));
-          return [...createdRows, ...remaining];
-        });
-        setEntries(prev => {
-          const uniqueIds = new Set(createdRows.map(r => r.no));
-          const remaining = prev.filter(p => !p._tempId || !uniqueIds.has(p.no));
-          return [...createdRows, ...remaining];
-        });
-      }
-
-      // Run a background authoritative sync to reconcile any drift
-      getAndSetVoucherData().catch(err => console.warn("Background sync failed:", err));
+      // Put each record's saved rows where its temp rows were; skip rows a refresh already loaded.
+      const swapIn = (rows) => {
+        const loadedIds = new Set(rows.map((row) => String(row?.objectId || '')).filter(Boolean));
+        const next = [];
+        const placed = new Set();
+        for (const row of rows) {
+          const bId = row?._batchId;
+          if (bId && batchIds.has(bId)) {
+            if (!placed.has(bId)) {
+              placed.add(bId);
+              next.push(...(savedByBatch.get(bId) || []).filter((r) => !loadedIds.has(String(r.objectId))));
+            }
+            continue;
+          }
+          next.push(row);
+        }
+        // A refresh dropped the temp rows before the save landed: add the saved rows
+        // if this draw is still on screen.
+        if (selectedDrawIdRef.current === drawId) {
+          for (const q of batch) {
+            if (placed.has(q.batchId)) continue;
+            next.push(...(savedByBatch.get(q.batchId) || []).filter((r) => !loadedIds.has(String(r.objectId))));
+          }
+        }
+        return next;
+      };
+      setVoucherData(swapIn);
+      setEntries(swapIn);
+      toast.success(rowCount === 1 ? "Record saved" : `${rowCount} records saved`, { id: 'entry-save' });
     } catch (error) {
-      // Rollback optimistic UI on failure
-      setVoucherData(prev);
-      setEntries(prev);
-      dispatch(hideLoading());
-      console.error("Error adding entries:", error.response?.data?.error || error.message);
-      toast.error(error.response?.data?.error || "Failed to add record ❌");
+      // Remove only this request's rows; entries queued or saved meanwhile stay.
+      setVoucherData(withoutBatch);
+      setEntries(withoutBatch);
+      const failedNumbers = batch.flatMap((q) => q.rows.map((r) => r.uniqueId)).join(', ');
+      const serverMessage = error.response?.data?.error || error.message || "Network/server error";
+      console.error("Error adding entries:", serverMessage);
+      toast.error(`Entry ${failedNumbers} not saved: ${serverMessage}`, { duration: 6000 });
+    } finally {
+      saveInFlightRef.current = false;
+      if (saveQueueRef.current.length > 0) flushSaveQueue();
     }
   };
 
@@ -823,12 +880,12 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
         },
       });
 
-      console.log("getDatabydate", response);
-
-
-      return response.data.data;
+      return response.data?.data || [];
     } catch (error) {
-      toast.error((error.response?.data?.error));
+      // An empty draw is not an error (older servers answered 404 for it).
+      if (error.response?.status !== 404) {
+        toast.error(error.response?.data?.error || "Failed to load records");
+      }
       return [];
     }
   };
@@ -890,124 +947,157 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
       return;
     }
 
+    const drawId = selectedDraw._id;
     const fetchedData = await fetchVoucherData(drawDate);
+    // The user may have switched draws while this was loading.
+    if (selectedDrawIdRef.current !== drawId) return;
 
-    if (Array.isArray(fetchedData) && fetchedData.length > 0) {
-      // Only use records that match the selectedDraw (backend should already filter by drawId)
-      const filteredRecords = fetchedData.filter((record) => {
-        const recordDrawId = record.drawId?._id || record.drawId || record._doc?.drawId;
-        return String(recordDrawId) === String(selectedDraw._id);
-      });
+    // Only use records that match the selectedDraw (backend should already filter by drawId)
+    const filteredRecords = (Array.isArray(fetchedData) ? fetchedData : []).filter((record) => {
+      const recordDrawId = record.drawId?._id || record.drawId || record._doc?.drawId;
+      return String(recordDrawId) === String(drawId);
+    });
+    const loaded = toVoucherRows(filteredRecords);
 
-      const combinedEntries = filteredRecords.flatMap((record) =>
-        record.data.map((item, index) => ({
-          parentId: record._id, // to keep track of the parent record
-          objectId: item._id, // to keep track of the parent record
-          // serial: index + 1, // creates a unique-enough ID without needing global index
-          no: item.uniqueId,
-          f: item.firstPrice,
-          s: item.secondPrice,
-          selected: false,
-        }))
-      );
-
-      setVoucherData(combinedEntries);
-      setEntries(combinedEntries);
-      console.log("combined entires", combinedEntries);  // jo bhi entries hongi wo yengi
-
-    } else {
-      setVoucherData([]);
-      setEntries([]);
-    }
+    // Keep rows that are still waiting to be saved for this draw.
+    const keepPending = (prev) => [
+      ...loaded,
+      ...prev.filter((row) => row?._tempId && row._drawId === drawId),
+    ];
+    setVoucherData(keepPending);
+    setEntries(keepPending);
   };
+
+  // Clients: pick up changes made elsewhere (e.g. the distributor deleting an
+  // imported DBF file) every 30s and when the window regains focus.
+  const refreshFromServerRef = useRef(null);
+  refreshFromServerRef.current = async () => {
+    await getAndSetVoucherData();
+    try {
+      const id = JSON.parse(atob(String(token).split('.')[1] || '')).id;
+      if (!id) return;
+      const res = await axios.get(`/api/v1/users/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (typeof res.data?.balance === 'number') syncBalance(res.data.balance);
+    } catch { /* balance refresh is best effort */ }
+  };
+  useEffect(() => {
+    if (!selectedDraw?._id || userData?.user?.role === 'distributor') return undefined;
+    const tick = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (saveInFlightRef.current || saveQueueRef.current.length) return;
+      refreshFromServerRef.current?.().catch(() => {});
+    };
+    const timer = setInterval(tick, 30000);
+    window.addEventListener('focus', tick);
+    return () => { clearInterval(timer); window.removeEventListener('focus', tick); };
+  }, [selectedDraw?._id, userData?.user?.role]);
 
   // delete handler the record based on id 
 
   const handleDeleteRecord = async (parentId) => {
+    if (blockIfDrawClosed()) return;
 
     // Ask for confirmation before deleting
     const ok = window.confirm('Do you want to delete this record?');
     if (!ok) return;
 
-    console.log("Deleting record with ID:", parentId);
     try {
       const token = localStorage.getItem('token');
 
-      await axios.delete(`/api/v1/data/delete-data/${parentId}`, {
+      const response = await axios.delete(`/api/v1/data/delete-data/${parentId}`, {
         headers: {
           Authorization: `Bearer ${token}`,
         },
       });
 
+      syncBalance(response.data?.newBalance);
+      setEntries((prev) => prev.filter((e) => e.parentId !== parentId));
+      setVoucherData((prev) => prev.filter((e) => e.parentId !== parentId));
       toast.success('Record deleted successfully');
-      await fetchVoucherData(); // Re-fetch updated data
-      await getAndSetVoucherData();
 
     } catch (error) {
       console.error('Error deleting record:', error);
-      toast.error('Failed to delete record');
+      toast.error(error.response?.data?.error || 'Failed to delete record');
     }
 
   };
 
   // Delete multiple selected entries
   const handleDeleteSelected = async () => {
+    if (blockIfDrawClosed()) return;
     if (selectedEntries.length === 0) {
       toast("No entries selected!");
       return;
     }
+    // Only rows that are saved and on screen now (never a leftover selection from another draw).
+    const visibleIds = new Set(entries.map((e) => e?.objectId).filter(Boolean).map(String));
     const idsToDelete = selectedEntries.filter(
-      (id) => typeof id === "string" && /^[a-f0-9]{24}$/i.test(id)
+      (id) => typeof id === "string" && /^[a-f0-9]{24}$/i.test(id) && visibleIds.has(id)
     );
     if (idsToDelete.length === 0) {
       toast("Selected rows are not saved yet.");
       return;
     }
+    const allOnScreen = idsToDelete.length === visibleIds.size;
+    const ok = window.confirm(
+      allOnScreen
+        ? `Delete ALL ${idsToDelete.length} entries of this draw?`
+        : `Delete ${idsToDelete.length} selected entries?`
+    );
+    if (!ok) return;
     try {
       const token = localStorage.getItem("token");
 
-      await axios.delete(`/api/v1/data/delete-individual-entries`, {
+      const response = await axios.delete(`/api/v1/data/delete-individual-entries`, {
         headers: {
           Authorization: `Bearer ${token}`,
         },
         data: { entryIds: idsToDelete },
       });
 
-      toast.success("Selected records deleted successfully");
+      const deletedCount = response.data?.deletedCount ?? idsToDelete.length;
+      toast.success(`${deletedCount} entries deleted`);
+      syncBalance(response.data?.newBalance);
 
-      // Optimistic UI update; also run a background sync for safety.
-      setEntries((prev) => prev.filter((e) => !idsToDelete.includes(e.objectId)));
-      setVoucherData((prev) => prev.filter((e) => !idsToDelete.includes(e.objectId)));
-      setSelectedEntries((prev) => prev.filter((id) => !idsToDelete.includes(id)));
+      const deleted = new Set(idsToDelete);
+      setEntries((prev) => prev.filter((e) => !deleted.has(e.objectId)));
+      setVoucherData((prev) => prev.filter((e) => !deleted.has(e.objectId)));
+      setSelectedEntries((prev) => prev.filter((id) => !deleted.has(id)));
       setSelectAll(false);
-      getAndSetVoucherData().catch(() => {});
     } catch (error) {
       console.error("Error deleting selected records:", error);
-      toast.error("Failed to delete selected records");
+      toast.error(error.response?.data?.error || "Failed to delete selected records");
+      // Part may have been deleted: show the server's balance and rows.
+      syncBalance(error.response?.data?.newBalance);
+      if (error.response?.data?.deletedCount) {
+        setSelectedEntries([]);
+        getAndSetVoucherData().catch(() => {});
+      }
     }
   };
 
   const handleDeleteEntry = async (entry) => {
     const entryId = entry?.objectId;
     if (!entryId) return;
+    if (blockIfDrawClosed()) return;
 
     const ok = window.confirm("Do you want to delete this entry?");
     if (!ok) return;
 
     try {
       const token = localStorage.getItem("token");
-      await axios.delete(`/api/v1/data/delete-individual-entries`, {
+      const response = await axios.delete(`/api/v1/data/delete-individual-entries`, {
         headers: { Authorization: `Bearer ${token}` },
         data: { entryIds: [entryId] },
       });
+      syncBalance(response.data?.newBalance);
       setEntries((prev) => prev.filter((e) => e.objectId !== entryId));
       setVoucherData((prev) => prev.filter((e) => e.objectId !== entryId));
       setSelectedEntries((prev) => prev.filter((id) => id !== entryId));
       toast.success("Entry deleted");
-      getAndSetVoucherData().catch(() => {});
     } catch (error) {
       console.error("Error deleting entry:", error);
-      toast.error("Failed to delete entry");
+      toast.error(error.response?.data?.error || "Failed to delete entry");
     }
   };
 
@@ -1048,7 +1138,7 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
   const deferredEntries = useDeferredValue(entries);
 
   if (loading) {  // this is loading that is running in seprately 
-    return <p className="text-center text-lg"><Spinner /></p>;
+    return <div className="text-center text-lg"><Spinner /></div>;
   }
 
   if (error) {
@@ -1207,6 +1297,7 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
         headers: { Authorization: `Bearer ${token}` },
       });
       toast.success('DBF imported successfully');
+      setClientSaleRefreshKey((k) => k + 1);
       setShowImportDBFModal(false);
       setImportFile(null);
       setImportParsedRows([]);
@@ -2944,14 +3035,14 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
       doc.setFillColor(230, 230, 230);
       doc.setDrawColor(0, 0, 0);
       // draw all header rectangles first (fill + stroke)
-      doc.rect(x, yy, colWidths[0], rowHeight, 'FD');
-      doc.rect(x + colWidths[0], yy, colWidths[1], rowHeight, 'FD');
-      doc.rect(x + colWidths[0] + colWidths[1], yy, colWidths[2], rowHeight, 'FD');
+      doc.rect(x, y, colWidths[0], rowHeight, 'FD');
+      doc.rect(x + colWidths[0], y, colWidths[1], rowHeight, 'FD');
+      doc.rect(x + colWidths[0] + colWidths[1], y, colWidths[2], rowHeight, 'FD');
       // then draw texts on top
       doc.setTextColor(0, 0, 0);
-      doc.text("Number", x + 1, yy + 5);
-      doc.text("First", x + colWidths[0] + 1, yy + 5);
-      doc.text("Second", x + colWidths[0] + colWidths[1] + 1, yy + 5);
+      doc.text("Number", x + 1, y + 5);
+      doc.text("First", x + colWidths[0] + 1, y + 5);
+      doc.text("Second", x + colWidths[0] + colWidths[1] + 1, y + 5);
       // reset fill to white for subsequent rects
       doc.setFillColor(255, 255, 255);
 
@@ -4128,9 +4219,15 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
 
     if (!selectedDraw.draw_date) return false;
 
-    const drawDateObj = new Date(selectedDraw.draw_date);
-    drawDateObj.setHours(23, 59, 59, 999); // end of draw day
-    return Date.now() >= drawDateObj.getTime();
+    // Closes at the draw time itself, same as the "Expires In" countdown and the server.
+    return Date.now() >= new Date(selectedDraw.draw_date).getTime();
+  };
+
+  // A closed draw is final: no new entries and no deletes.
+  const blockIfDrawClosed = () => {
+    if (!isPastClosingTime()) return false;
+    toast.error("Draw is closed. Entries cannot be deleted.");
+    return true;
   };
 
   {/* Main Content */ }
@@ -4154,24 +4251,24 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
         </div>
         <div className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5">
           <div className="text-xs text-gray-400">Count</div>
-          <div className="text-base font-semibold">{distributorSummary.recordCount}</div>
+          <div className="text-base font-semibold">{(clientSaleSummary || distributorSummary).recordCount}</div>
         </div>
         <div className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5">
           <div className="text-xs text-gray-400">Total</div>
           <div className="text-base font-semibold">
-            {(() => { const n = Number(distributorSummary.grandTotal); return !isNaN(n) ? n.toLocaleString() : "-"; })()}
+            {(() => { const n = Number((clientSaleSummary || distributorSummary).grandTotal); return !isNaN(n) ? n.toLocaleString() : "-"; })()}
           </div>
         </div>
         <div className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5">
           <div className="text-xs text-gray-400">First</div>
           <div className="text-base font-semibold">
-            {(() => { const n = Number(distributorSummary.firstTotal); return !isNaN(n) ? n.toLocaleString() : "-"; })()}
+            {(() => { const n = Number((clientSaleSummary || distributorSummary).firstTotal); return !isNaN(n) ? n.toLocaleString() : "-"; })()}
           </div>
         </div>
         <div className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5">
           <div className="text-xs text-gray-400">Second</div>
           <div className="text-base font-semibold">
-            {(() => { const n = Number(distributorSummary.secondTotal); return !isNaN(n) ? n.toLocaleString() : "-"; })()}
+            {(() => { const n = Number((clientSaleSummary || distributorSummary).secondTotal); return !isNaN(n) ? n.toLocaleString() : "-"; })()}
           </div>
         </div>
       </div>
@@ -4224,37 +4321,14 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
 
       {/* Main content */}
       {userData?.user?.role === "distributor" ? (
-        <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-2 gap-3">
-          <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-white">
-            <h3 className="text-lg font-semibold mb-2">Distributor</h3>
-            <p className="text-sm text-gray-300">Entries are disabled in this panel.</p>
-          </div>
-          <div className="bg-gray-800 border border-gray-700 rounded-lg p-4 text-white">
-            <h3 className="text-lg font-semibold mb-3 flex items-center space-x-2">
-              <FaBell className="text-yellow-300" />
-              <span>Notifications</span>
-            </h3>
-
-            {winningNumbers.length > 0 ? (
-              <div className="space-y-2 text-sm">
-                <div className="text-gray-300">Winning numbers:</div>
-                <div className="flex flex-wrap gap-2">
-                  {winningNumbers.map((item, index) => (
-                    <span
-                      key={`${item.type}-${item.number}-${index}`}
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded bg-gray-700 border border-gray-600"
-                    >
-                      <span className="text-gray-300">{String(item.type).toUpperCase()}</span>
-                      <span className="text-yellow-300 font-semibold">{item.number}</span>
-                    </span>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="text-sm text-gray-300">No notifications yet.</div>
-            )}
-          </div>
-        </div>
+        <DistributorSaleView
+          key={clientSaleRefreshKey}
+          selectedDraw={selectedDraw}
+          token={token}
+          clients={clients}
+          parties={parties}
+          onSummary={setClientSaleSummary}
+        />
       ) : (
         <>
           {/* Entry row (separate from table) */}
