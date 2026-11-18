@@ -1,3 +1,12 @@
+// When the draw stops taking entries. An admin can reopen a closed draw until
+// a later time; the server sends that as closesAt.
+export const getDrawClosesAt = (draw) => {
+  if (!draw) return null;
+  const raw = draw.closesAt || draw.draw_date;
+  const t = raw ? new Date(raw).getTime() : NaN;
+  return Number.isFinite(t) ? t : null;
+};
+
 export const isDrawExpired = (draw) => {
   if (!draw) return false;
 
@@ -7,12 +16,8 @@ export const isDrawExpired = (draw) => {
     return draw.remainingMs <= 0;
   }
 
-  if (draw.draw_date) {
-    const dt = new Date(draw.draw_date);
-    if (!Number.isNaN(dt.getTime())) {
-      return dt.getTime() <= Date.now();
-    }
-  }
+  const closesAt = getDrawClosesAt(draw);
+  if (closesAt != null) return closesAt <= Date.now();
 
   return false;
 };
@@ -53,7 +58,7 @@ export const formatDrawOptionLabel = (draw, { includeStatus = true } = {}) => {
 
   const statusText = isDrawExpired(draw)
     ? 'Closed'
-    : (draw.isActive ? 'Active' : 'Inactive');
+    : (draw.isReopened ? 'Reopened' : (draw.isActive ? 'Active' : 'Inactive'));
 
   return `${core} (${statusText})`;
 };

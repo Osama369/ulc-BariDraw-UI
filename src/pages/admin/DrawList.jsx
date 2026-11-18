@@ -16,6 +16,30 @@ const initialForm = {
   prize: '',
 };
 
+// Value for <input type="datetime-local"> in the browser's own time zone.
+const toLocalInput = (date) => {
+  const d = new Date(date);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
+const reopenPresets = () => {
+  const now = Date.now();
+  const tonight = new Date();
+  tonight.setHours(23, 59, 0, 0);
+  const list = [
+    { label: '2 hours', value: new Date(now + 2 * 3600 * 1000) },
+    { label: '6 hours', value: new Date(now + 6 * 3600 * 1000) },
+    { label: '24 hours', value: new Date(now + 24 * 3600 * 1000) },
+  ];
+  if (tonight.getTime() - now > 30 * 60 * 1000) list.unshift({ label: 'Till 11:59 PM tonight', value: tonight });
+  return list;
+};
+
+const formatDateTime = (value) => (value
+  ? new Date(value).toLocaleString([], { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+  : '');
+
 const DrawList = () => {
   const [draws, setDraws] = useState([]);
   const [loadingLocal, setLoadingLocal] = useState(false);
@@ -24,6 +48,9 @@ const DrawList = () => {
   const dispatch = useDispatch();
   const [filterCategory, setFilterCategory] = useState('ALL');
   const [remainingMap, setRemainingMap] = useState({});
+  // { draw, until } while the Reopen box is open
+  const [reopenBox, setReopenBox] = useState(null);
+  const [reopenBusy, setReopenBusy] = useState(false);
 
   const fetchDraws = async () => {
     setLoadingLocal(true);
@@ -219,6 +246,44 @@ const DrawList = () => {
     }
   };
 
+  const applyDrawUpdate = (updated) => {
+    setDraws((prev) => prev.map(d => d._id === updated._id ? updated : d));
+    setRemainingMap((prev) => ({ ...prev, [updated._id]: updated.remainingMs ?? 0 }));
+  };
+
+  const openReopenBox = (draw) => {
+    const first = reopenPresets()[0].value;
+    setReopenBox({ draw, until: toLocalInput(first) });
+  };
+
+  const saveReopen = async (draw, until) => {
+    setReopenBusy(true);
+    try {
+      const token = localStorage.getItem('adminToken');
+      const res = await axios.patch(`/api/v1/draws/${draw._id}/reopen`, { until }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      applyDrawUpdate(res.data);
+      setReopenBox(null);
+      toast.success(until
+        ? `Draw reopened until ${formatDateTime(res.data.reopenUntil)}`
+        : 'Draw closed again');
+    } catch (err) {
+      toast.error(err.response?.data?.error || err.response?.data?.message || 'Failed to update the draw');
+    } finally {
+      setReopenBusy(false);
+    }
+  };
+
+  const submitReopen = () => {
+    if (!reopenBox?.until) return toast.error('Pick a time to keep the draw open until.');
+    const until = new Date(reopenBox.until);
+    if (Number.isNaN(until.getTime()) || until.getTime() <= Date.now()) {
+      return toast.error('The reopen time must be in the future.');
+    }
+    saveReopen(reopenBox.draw, until.toISOString());
+  };
+
   const toggleActive = async (id) => {
     try {
       dispatch(showLoading());
@@ -377,13 +442,29 @@ const DrawList = () => {
                   <td className="px-4 py-2">{d.category === 'PAKISTAN' && d.prize != null ? d.prize : '-'}</td>
                   <td className="px-4 py-2">{d.category === 'PAKISTAN' ? (d.drawNo ?? '-') : '-'}</td>
                     <td className="px-4 py-2">{d.draw_date ? d.draw_date.split('T')[0] : ''}</td>
-                    <td className="px-4 py-2">{formatRemaining(remainingMap[d._id] ?? (d.remainingMs ?? 0))}</td>
+                    <td className="px-4 py-2">
+                      {formatRemaining(remainingMap[d._id] ?? (d.remainingMs ?? 0))}
+                      {d.isReopened && (
+                        <div className="mt-1 inline-block rounded bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-800">
+                          Reopened until {formatDateTime(d.reopenUntil)}
+                        </div>
+                      )}
+                    </td>
                   <td className="px-4 py-2">{d.category === 'PAKISTAN' ? (d.city || '-') : '-'}</td>
                     <td className="px-4 py-2">{d.isActive ? 'Yes' : 'No'}</td>
                   <td className="px-4 py-2">
                     <button className="text-blue-600 mr-2" onClick={() => handleEdit(d)}>Edit</button>
-                    {!d.isExpired && (
+                    {!d.isExpired && !d.isReopened && (
                       <button className="text-red-500 mr-2" onClick={() => expireNow(d._id)}>Expire Now</button>
+                    )}
+                    {d.isExpired && (
+                      <button className="text-emerald-700 font-semibold mr-2" onClick={() => openReopenBox(d)}>Reopen</button>
+                    )}
+                    {d.isReopened && (
+                      <>
+                        <button className="text-emerald-700 mr-2" onClick={() => openReopenBox(d)}>Change time</button>
+                        <button className="text-red-500 font-semibold mr-2" disabled={reopenBusy} onClick={() => saveReopen(d, null)}>Close now</button>
+                      </>
                     )}
                     <button className="text-yellow-600 mr-2" onClick={() => toggleActive(d._id)}>{d.isActive ? 'Deactivate' : 'Activate'}</button>
                     <button className="text-red-600" onClick={() => handleDelete(d._id)}>Delete</button>
@@ -398,6 +479,53 @@ const DrawList = () => {
           </tbody>
         </table>
       </div>
+
+      {reopenBox && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !reopenBusy && setReopenBox(null)}>
+          <div className="w-full max-w-md rounded-lg bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold">Reopen draw</h3>
+            <p className="mt-1 text-sm text-gray-600">
+              {reopenBox.draw.title} {reopenBox.draw.serialNoDisplay ? `(S#${reopenBox.draw.serialNoDisplay})` : ''}
+              {reopenBox.draw.city ? ` - ${reopenBox.draw.city}` : ''} - draw date {formatDateTime(reopenBox.draw.draw_date)}
+            </p>
+            <p className="mt-3 text-sm text-gray-700">
+              Clients and distributors can add, delete and email entries for this draw again until the time you pick.
+              After that it closes by itself.
+            </p>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              {reopenPresets().map((p) => (
+                <button
+                  key={p.label}
+                  type="button"
+                  className={`rounded border px-3 py-1 text-sm ${reopenBox.until === toLocalInput(p.value) ? 'border-emerald-600 bg-emerald-50 text-emerald-800' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+                  onClick={() => setReopenBox((b) => ({ ...b, until: toLocalInput(p.value) }))}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+
+            <label className="mt-4 block text-sm font-medium text-gray-700">Keep open until</label>
+            <input
+              type="datetime-local"
+              className="mt-1 w-full rounded border p-2"
+              value={reopenBox.until}
+              min={toLocalInput(new Date())}
+              onChange={(e) => setReopenBox((b) => ({ ...b, until: e.target.value }))}
+            />
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" className="rounded border px-4 py-2 text-sm" disabled={reopenBusy} onClick={() => setReopenBox(null)}>
+                Cancel
+              </button>
+              <button type="button" className="rounded bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={reopenBusy} onClick={submitReopen}>
+                {reopenBusy ? 'Saving...' : 'Reopen draw'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

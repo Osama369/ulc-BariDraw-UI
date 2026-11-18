@@ -22,6 +22,8 @@ const buildDrawSignature = (draws) => {
       d?.isActive ? '1' : '0',
       d?.isExpired ? '1' : '0',
       d?.draw_date || '',
+      d?.closesAt || '',
+      d?.isReopened ? '1' : '0',
       d?.updatedAt || '',
       d?.title || '',
       d?.category || '',

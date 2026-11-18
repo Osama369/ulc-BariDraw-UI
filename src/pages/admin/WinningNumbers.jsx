@@ -309,13 +309,13 @@ const WinningNumbers = () => {
               >
                 <option value="">-- Select draw --</option>
                 {draws
-                  .filter(d => d.isExpired || d.status === 'closed')
+                  .filter(d => d.isExpired || d.isReopened || d.status === 'closed')
                   .map(draw => (
                     <option
                       key={draw._id}
                       value={draw._id}
                     >
-                      {`${draw.title || 'Draw'} - ${new Date(draw.draw_date).toLocaleDateString()} ${draw.isExpired ? '(Closed)' : ''}`}
+                      {`${draw.title || 'Draw'} - ${new Date(draw.draw_date).toLocaleDateString()} ${draw.isReopened ? '(Reopened)' : (draw.isExpired ? '(Closed)' : '')}`}
                     </option>
                   ))}
               </select>

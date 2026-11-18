@@ -31,7 +31,7 @@ const matchesPrizeType = (number, type) => {
 const isDrawClosed = (draw) => {
     if (!draw) return false;
     if (draw.isExpired) return true;
-    const t = new Date(draw.draw_date).getTime();
+    const t = new Date(draw.closesAt || draw.draw_date).getTime();
     return Number.isFinite(t) && t <= Date.now();
 };
 

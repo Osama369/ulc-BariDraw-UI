@@ -4217,10 +4217,11 @@ const Center = ({ onToggleSidebar, sidebarVisible, initialImportOpen = false }) 
 
     if (selectedDraw.isExpired) return true;
 
-    if (!selectedDraw.draw_date) return false;
+    const closesAt = selectedDraw.closesAt || selectedDraw.draw_date;
+    if (!closesAt) return false;
 
-    // Closes at the draw time itself, same as the "Expires In" countdown and the server.
-    return Date.now() >= new Date(selectedDraw.draw_date).getTime();
+    // Closes at the draw time (or the end of an admin reopen), same as the countdown and the server.
+    return Date.now() >= new Date(closesAt).getTime();
   };
 
   // A closed draw is final: no new entries and no deletes.
